@@ -1,0 +1,174 @@
+// myProg_test.ab - Comprehensive Test for abCore16 16-bit Architecture
+// This program tests various instructions, all registers (R0-R7),
+// and both decimal and hexadecimal number formats.
+
+// --- Initialization & Basic Data Movement ---
+SET R0 0x000A     // R0 = 10 (hex)
+SET R1 20         // R1 = 20 (decimal)
+MOV R2 R0         // R2 = R0 (10)
+MOV R3 R1         // R3 = R1 (20)
+SET R4 0xFFFF     // R4 = 65535 (max unsigned 16-bit)
+SET R5 0x8000     // R5 = 32768 (min signed 16-bit / max positive + 1 unsigned)
+SET R6 1          // R6 = 1
+SET R7 0          // R7 = 0
+
+PRINT R0          // Expected: 10
+PRINT R1          // Expected: 20
+PRINT R2          // Expected: 10
+PRINT R3          // Expected: 20
+PRINT R4          // Expected: 65535
+PRINT R5          // Expected: 32768
+PRINT R6          // Expected: 1
+PRINT R7          // Expected: 0
+
+// --- Arithmetic Operations ---
+// ADD
+ADD R0 R1         // R0 = 10 + 20 = 30. Flags: ZF=0,SF=0,CF=0,OF=0
+PRINT R0          // Expected: 30
+ADD R4 R6         // R4 = 65535 + 1 = 0. Flags: ZF=1,SF=0,CF=1,OF=0
+PRINT R4          // Expected: 0 (R4 was 65535, now 0 due to wrap)
+SET R0 30000
+SET R1 30000
+ADD R0 R1         // R0 = 60000. Flags: ZF=0,SF=1,CF=0,OF=1 (signed overflow)
+PRINT R0          // Expected: 60000
+
+// SUB
+SET R2 100
+SET R3 70
+SUB R2 R3         // R2 = 100 - 70 = 30. Flags: ZF=0,SF=0,CF=0,OF=0
+PRINT R2          // Expected: 30
+SUB R3 R2         // R3 = 70 - 30 = 40. Flags: ZF=0,SF=0,CF=0,OF=0
+PRINT R3          // Expected: 40
+SUB R3 R2         // R3 = 40 - 30 = 10. Flags: ZF=0,SF=0,CF=0,OF=0
+PRINT R3          // Expected: 10
+SET R0 10
+SET R1 20
+SUB R0 R1         // R0 = 10 - 20 = -10 (65526). Flags: ZF=0,SF=1,CF=1 (borrow),OF=0
+PRINT R0          // Expected: 65526
+
+// MUL
+SET R4 0x0010     // R4 = 16
+SET R5 0x000A     // R5 = 10
+MUL R4 R5         // R4 = 16 * 10 = 160 (0x00A0). Flags: ZF=0,SF=0,CF=0,OF=0
+PRINT R4          // Expected: 160
+SET R4 200
+SET R5 400        // R5 = 400
+MUL R4 R5         // R4 = 200 * 400 = 80000. Result 80000 & 0xFFFF = 14464 (0x3880). Flags: CF=1,OF=1
+PRINT R4          // Expected: 14464
+
+// INC / DEC
+SET R6 0xFFFE     // R6 = 65534
+INC R6            // R6 = 65535. Flags: ZF=0,SF=1,CF=0,OF=0
+PRINT R6          // Expected: 65535
+INC R6            // R6 = 0. Flags: ZF=1,SF=0,CF=1,OF=0
+PRINT R6          // Expected: 0
+DEC R6            // R6 = 65535. Flags: ZF=0,SF=1,CF=1,OF=0
+PRINT R6          // Expected: 65535
+DEC R7            // R7 = 0 - 1 = 65535.
+PRINT R7          // Expected: 65535
+
+// --- Bitwise Operations ---
+SET R0 0xF0F0
+SET R1 0x0F0F
+AND R0 R1         // R0 = 0xF0F0 & 0x0F0F = 0x0000. Flags: ZF=1,SF=0,CF=0,OF=0
+PRINT R0          // Expected: 0
+SET R0 0xF0F0
+OR R0 R1          // R0 = 0xF0F0 | 0x0F0F = 0xFFFF. Flags: ZF=0,SF=1,CF=0,OF=0
+PRINT R0          // Expected: 65535
+SET R0 0xF0F0
+XOR R0 R1         // R0 = 0xF0F0 ^ 0x0F0F = 0xFFFF. Flags: ZF=0,SF=1,CF=0,OF=0
+PRINT R0          // Expected: 65535
+NOT R0            // R0 = ~0xFFFF = 0x0000. Flags: ZF=1,SF=0,CF unchanged, OF=0
+PRINT R0          // Expected: 0
+
+// --- Shift Operations ---
+SET R2 0xABCD     // 1010101111001101b
+SHL R2 0x4        // Shift R2 left by 4. R2 = 0xBCD0. CF=1 (original bit 15 was 1)
+PRINT R2          // Expected: 48080 (0xBCD0)
+SHR R2 0x8        // Shift R2 (0xBCD0) right by 8. R2 = 0x00BC. CF=0 (original bit 7 of 0xBCD0 was 0)
+PRINT R2          // Expected: 188 (0x00BC)
+
+// --- Memory Operations (16-bit address, 16-bit data) ---
+SET R3 0x1234
+SET R4 0x0200     // Address 512
+STORE R3 0x0200   // Memory[512] = 0x1234
+SET R3 0          // Clear R3
+FETCH R3 0x0200   // R3 = Memory[512] (should be 0x1234)
+PRINT R3          // Expected: 4660 (0x1234)
+
+// --- Stack Operations & Subroutines (16-bit SP, 16-bit data, 16-bit ret addr) ---
+SET R0 100       // Value for subroutine
+SET R1 200       // Another value
+CALL ADD_VALUES
+PRINT R0         // Expected: 300 (result of R0+R1 from subroutine, returned in R0)
+PRINT R1         // Expected: 200 (R1 should be preserved by PUSH/POP if sub uses it)
+PRINT R2         // Expected: 100 (R2 should be preserved if PUSH/POP used)
+
+JMP AFTER_ALL_SUBS
+
+ADD_VALUES:      // Subroutine: R0 = R0 + R1. Preserves R1.
+  PUSH R1        // Save R1
+  ADD R0 R1      // R0 has the sum
+  POP R1         // Restore R1
+  RET
+
+AFTER_ALL_SUBS:
+  NOP
+
+// --- Comparison and Conditional Jumps (using 16-bit flags) ---
+SET R5 1000
+SET R6 1000
+CMP R5 R6        // R5-R6 = 0. ZF=1, SF=0, CF=0, OF=0
+JE  LABEL_EQUAL
+JMP LABEL_FAIL   // Should not reach here
+
+LABEL_EQUAL:
+  SET R7 1       // Indicate JE worked
+  PRINT R7       // Expected: 1
+
+  SET R5 1000
+  SET R6 2000
+  CMP R5 R6        // R5-R6 = -1000 (negative). ZF=0, SF=1, CF=1 (borrow), OF=0
+  JNE LABEL_NOT_EQUAL
+  JMP LABEL_FAIL
+
+LABEL_NOT_EQUAL:
+  SET R7 2
+  PRINT R7       // Expected: 2
+  JS  LABEL_SIGN
+//  JMP LABEL_FAIL
+
+LABEL_SIGN:
+  SET R7 3
+  PRINT R7       // Expected: 3
+  JC  LABEL_CARRY
+  JMP LABEL_FAIL
+
+LABEL_CARRY:
+  SET R7 4
+  PRINT R7       // Expected: 4
+
+// Test JMPZ and JMPN (direct register check)
+  SET R0 1
+  DEC R0         // R0 is now 0
+  JMPZ R0 LABEL_R0_IS_ZERO
+  JMP LABEL_FAIL
+
+LABEL_R0_IS_ZERO:
+  SET R7 5
+  PRINT R7       // Expected: 5
+  DEC R0         // R0 is now 0xFFFF (negative)
+  JMPN R0 LABEL_R0_IS_NEGATIVE
+  JMP LABEL_FAIL
+
+LABEL_R0_IS_NEGATIVE:
+  SET R7 6
+  PRINT R7       // Expected: 6
+  JMP END_TESTS
+
+LABEL_FAIL:
+  SET R7 0xFF    // Indicate a jump test failed
+  PRINT R7
+
+END_TESTS:
+  HALT
