@@ -1,0 +1,33 @@
+// test_program.ssl - Example C-like SSL for abCore16 PLY Compiler
+
+// Variable usage (conceptual - full declarations not yet supported by simple example)
+// int x;
+// int y;
+// int z;
+
+x = 10;          // Assignment
+y = 20;
+R0 = x + y;      // Expression with variables and register
+print R0;        // Expected SAL: OUT R0 (after R0 gets 30)
+
+if (R0 == 30) {  // IF statement
+    print 1;     // Expected SAL: LOAD temp, #1; OUT temp
+} else {
+    print 0;     // Expected SAL: LOAD temp, #0; OUT temp
+}
+
+z = 5;     // loop count
+print 999; // A marker print
+while (z > 0) {  // WHILE statement
+    print z;
+    z = z - 1;
+}
+
+print 777; // Another marker
+
+// A final operation to ensure the generated SAL can be HALTed by the assembler
+// if your main abCore16 toolchain expects a HALT from the simple_compiler output.
+// If your PLY compiler is meant to produce SAL that is then assembled,
+// the SAL itself doesn't strictly need a HALT, but the final binary will.
+// For now, let's assume the generated SAL can be "complete" for testing.
+// We might add a HALT instruction at the end of the code_generator.
