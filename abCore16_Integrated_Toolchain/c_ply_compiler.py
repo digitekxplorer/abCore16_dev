@@ -437,8 +437,9 @@ def p_error(p):
 
 # Changed debug to 0 to silence parser.out generation for normal runs.
 # write_tables can be True, tabmodule ensures c_ssl_parsetab.py is used/generated.
-parser_ply = yacc(debug=0, write_tables=True, tabmodule="c_ssl_parsetab")
+# parser_ply = yacc(debug=0, write_tables=True, tabmodule="c_ssl_parsetab")
 # REMOVED: print("DEBUG: c_ply_compiler.py: parser_ply object created/recreated.")
+parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
 
 from code_generator import SALCodeGenerator
 
