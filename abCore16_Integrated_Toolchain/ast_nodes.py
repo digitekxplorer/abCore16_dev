@@ -39,14 +39,14 @@ class ExpressionNode(Node):
     pass
 
 
-class AssignmentNode(StatementNode):  # Can also be used as an expression in some contexts
+class AssignmentNode(StatementNode):
     def __init__(self, target_name, value_expr, line_no=None):
         super().__init__(line_no)
-        self.target_name = target_name  # IdentifierNode
+        self.target_name = target_name  # Can be IdentifierNode or ArrayAccessNode
         self.value_expr = value_expr  # ExpressionNode
 
     def __repr__(self):
-        return f"AssignmentNode(target='{self.target_name.name}', value_expr={self.value_expr!r})"
+        return f"AssignmentNode(target={self.target_name!r}, value_expr={self.value_expr!r})"
 
 
 class VarDeclNode(StatementNode):
@@ -59,6 +59,17 @@ class VarDeclNode(StatementNode):
 
     def __repr__(self):
         return f"VarDeclNode(var_name='{self.var_name_node.name}', initialized={self.init_expr_node is not None})"
+
+
+class ArrayDeclNode(StatementNode):
+    """Represents a global array declaration, e.g., 'var my_arr[10];'."""
+    def __init__(self, var_name_node, size_value, line_no=None):
+        super().__init__(line_no)
+        self.var_name_node = var_name_node  # IdentifierNode
+        self.size = size_value              # Integer value for the size
+
+    def __repr__(self):
+        return f"ArrayDeclNode(name='{self.var_name_node.name}', size={self.size})"
 
 
 class PrintNode(StatementNode):
@@ -94,42 +105,23 @@ class WhileNode(StatementNode):
 class ForNode(StatementNode):
     def __init__(self, init_node, condition_expr_node, update_expr_stmt_node, body_node, line_no=None):
         super().__init__(line_no)
-        # init_node can be:
-        # 1. VarDeclNode (for `for (var i = 0; ...`)
-        # 2. ExpressionStatementNode (for `for (i = 0; ...` where i is pre-declared)
-        # 3. None (for `for ( ; ...`)
         self.init_node = init_node
-
-        # condition_expr_node will be an ExpressionNode or AssignmentNode (if grammar allows it as expr) or None
         self.condition_expr_node = condition_expr_node
-
-        # update_expr_stmt_node will be an ExpressionStatementNode (wrapping the update expression/assignment) or None
         self.update_expr_stmt_node = update_expr_stmt_node
-
-        # body_node will be a ProgramNode (representing the block statement)
         self.body_node = body_node
 
     def __repr__(self):
         init_repr = "None"
-        if self.init_node:
-            init_repr = f"{self.init_node!r}"
-
+        if self.init_node: init_repr = f"{self.init_node!r}"
         cond_repr = "None"
-        if self.condition_expr_node:
-            cond_repr = f"{self.condition_expr_node!r}"
-
+        if self.condition_expr_node: cond_repr = f"{self.condition_expr_node!r}"
         update_repr = "None"
         if self.update_expr_stmt_node:
-            # If it's an ExpressionStatementNode, show its internal expression for better repr
-            if isinstance(self.update_expr_stmt_node,
-                          ExpressionStatementNode) and self.update_expr_stmt_node.expression:
+            if isinstance(self.update_expr_stmt_node, ExpressionStatementNode) and self.update_expr_stmt_node.expression:
                 update_repr = f"ExprStmt({self.update_expr_stmt_node.expression!r})"
             else:
                 update_repr = f"{self.update_expr_stmt_node!r}"
-
-        body_stmts_count = len(self.body_node.statements) if self.body_node and hasattr(self.body_node,
-                                                                                        'statements') else 0
-
+        body_stmts_count = len(self.body_node.statements) if self.body_node and hasattr(self.body_node, 'statements') else 0
         return (f"ForNode(init={init_repr}, "
                 f"cond={cond_repr}, "
                 f"update={update_repr}, "
@@ -145,13 +137,24 @@ class NumberNode(ExpressionNode):
         return f"NumberNode(value={self.value})"
 
 
-class IdentifierNode(ExpressionNode):  # Also used as target in AssignmentNode and var_name in VarDeclNode
+class IdentifierNode(ExpressionNode):
     def __init__(self, name, line_no=None):
         super().__init__(line_no)
         self.name = name
 
     def __repr__(self):
         return f"IdentifierNode(name='{self.name}')"
+
+
+class ArrayAccessNode(ExpressionNode):
+    """Represents accessing an array element, e.g., 'my_arr[i]'."""
+    def __init__(self, name_node, index_expr_node, line_no=None):
+        super().__init__(line_no)
+        self.name_node = name_node          # IdentifierNode for the array name
+        self.index_expr_node = index_expr_node # ExpressionNode for the index
+
+    def __repr__(self):
+        return f"ArrayAccessNode(name='{self.name_node.name}', index={self.index_expr_node!r})"
 
 
 class BinaryOpNode(ExpressionNode):
@@ -175,7 +178,7 @@ class UnaryOpNode(ExpressionNode):
         return f"UnaryOpNode(op='{self.op}', operand={self.operand!r})"
 
 
-class FunctionDefinitionNode(Node):  # A top-level declaration
+class FunctionDefinitionNode(Node):
     def __init__(self, name_node, params_nodes, body_node, line_no=None):
         super().__init__(line_no)
         self.name_node = name_node  # IdentifierNode
@@ -184,8 +187,7 @@ class FunctionDefinitionNode(Node):  # A top-level declaration
 
     def __repr__(self):
         params_repr = [p.name for p in self.params_nodes] if self.params_nodes else []
-        body_stmts_count = len(self.body_node.statements) if self.body_node and hasattr(self.body_node,
-                                                                                        'statements') else 0
+        body_stmts_count = len(self.body_node.statements) if self.body_node and hasattr(self.body_node, 'statements') else 0
         return f"FunctionDefinitionNode(name='{self.name_node.name}', params={params_repr}, body_stmts={body_stmts_count})"
 
 
@@ -201,7 +203,7 @@ class ReturnNode(StatementNode):
 class ExpressionStatementNode(StatementNode):
     def __init__(self, expression, line_no=None):
         super().__init__(line_no)
-        self.expression = expression  # ExpressionNode (could be AssignmentNode if assignment is an expression)
+        self.expression = expression
 
     def __repr__(self):
         return f"ExpressionStatementNode(expr={self.expression!r})"
@@ -216,4 +218,3 @@ class FunctionCallNode(ExpressionNode):
     def __repr__(self):
         args_repr_str = ", ".join([repr(arg) for arg in self.args_nodes]) if self.args_nodes else ""
         return f"FunctionCallNode(name='{self.name_node.name}', args=[{args_repr_str}])"
-        
