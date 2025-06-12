@@ -10,7 +10,9 @@ OPCODES = {
     "NOP":   0x00, "LOAD":  0x01, "STORE": 0x02, "LOADM": 0x03,
     "LOADFR":0x04,
     "STORFR":0x05,
-    # Gap: 0x06 - 0x0F currently unused
+    "LOADI": 0x06,  # <<< NEW: Load Indirect (Rd = Mem[Rs])
+    "STORI": 0x07,  # <<< NEW: Store Indirect (Mem[Rs] = Rt)
+    # Gap: 0x08 - 0x0F currently unused
 
     "ADD":   0x10, "SUB":   0x11, "MUL":   0x12,
     "INC":   0x13, "DEC":   0x14,
@@ -33,9 +35,8 @@ OPCODES = {
     "CALL":  0x70, "RET":   0x71,
 
     "MOV":   0x80,
-    "MOVFRSP": 0x81, # <<< NEW: Move From SP (Rd = SP)
-    "MOVTOSP": 0x82, # <<< NEW: Move To SP (SP = Rs)
-    # 0x83 onwards available for MOV variants or other instructions
+    "MOVFRSP": 0x81,
+    "MOVTOSP": 0x82,
 
     "HALT":  0xFF
 }
@@ -52,14 +53,17 @@ VALID_REGISTERS = set(REG_CODES.keys())
 INSTRUCTION_FORMATS = {
     "NOP":   (1, []), "HALT":  (1, []), "RET":   (1, []),
     "LOAD":  (4, ['R', 'I16']), "STORE": (4, ['R', 'A16']), "LOADM": (4, ['R', 'A16']),
-    "LOADFR": (5, ['R', 'R', 'S16']), "STORFR": (5, ['R', 'R', 'S16']),
+    "LOADFR":(5, ['R', 'R', 'S16']),
+    "STORFR":(5, ['R', 'R', 'S16']),
+    "LOADI": (3, ['R', 'R']),      # <<< NEW: Op(1), Rd(1), Rs_addr(1)
+    "STORI": (3, ['R', 'R']),      # <<< NEW: Op(1), Rt_val(1), Rs_addr(1)
     "INM":   (4, ['R', 'A16']), "OUTM":  (4, ['R', 'A16']),
     "ADD":   (3, ['R', 'R']), "SUB":   (3, ['R', 'R']), "MUL":   (3, ['R', 'R']),
     "AND":   (3, ['R', 'R']), "OR":    (3, ['R', 'R']), "XOR":   (3, ['R', 'R']),
     "CMP":   (3, ['R', 'R']),
     "MOV":   (3, ['R', 'R']),
-    "MOVFRSP": (2, ['R']),      # Op(1), Rd(1) <<< NEW
-    "MOVTOSP": (2, ['R']),      # Op(1), Rs(1) <<< NEW
+    "MOVFRSP": (2, ['R']),
+    "MOVTOSP": (2, ['R']),
     "INC":   (2, ['R']), "DEC":   (2, ['R']), "NOT":   (2, ['R']),
     "INP":   (2, ['R']), "OUT":   (2, ['R']),
     "PUSH":  (2, ['R']), "POP":   (2, ['R']),
