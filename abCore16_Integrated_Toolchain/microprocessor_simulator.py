@@ -57,13 +57,12 @@ class MicroprocessorSimulator:
             if carry_occurred is not None: self.CF = bool(carry_occurred)
             if overflow_occurred is not None: self.OF = bool(overflow_occurred)
 
-        # Suppress flag logging for simple data movement unless flags are explicitly changed
-        if operation_str_for_log in ["LOAD", "LOADM", "MOV", "POP", "INP", "INM", "LOADFR", "MOVFRSP"] and \
+        if operation_str_for_log in ["LOAD", "LOADM", "MOV", "POP", "INP", "INM", "LOADFR", "MOVFRSP", "LOADI"] and \
                 carry_occurred is None and overflow_occurred is None and \
                 not clear_carry_overflow_for_logical and not is_compare_op:
             log_arith_flags = False
 
-        if is_compare_op: log_arith_flags = True  # Always log flags for CMP
+        if is_compare_op: log_arith_flags = True
 
         if log_arith_flags:
             self.output_log.append(
@@ -73,7 +72,7 @@ class MicroprocessorSimulator:
         return 0 <= address < self.data_memory_size
 
     def _get_reg_name(self, reg_code):
-        if reg_code is None: raise ValueError("Sim Error: Register code is None.")  # Check for None
+        if reg_code is None: raise ValueError("Sim Error: Register code is None.")
         if reg_code not in REG_NAMES: raise ValueError(f"Sim Error: Invalid reg code {reg_code}.")
         return REG_NAMES[reg_code]
 
@@ -106,7 +105,8 @@ class MicroprocessorSimulator:
             if not self.program_bytes: self.output_log.append("Sim: WARN: Loaded program empty.")
             return True
         except Exception as e:
-            self.output_log.append(f"Sim: ERR loading '{filepath}': {e}"); return False
+            self.output_log.append(f"Sim: ERR loading '{filepath}': {e}");
+            return False
 
     def _handle_mmio_read(self, address):
         eff_addr = self._apply_16bit_limits(address)
@@ -200,22 +200,18 @@ class MicroprocessorSimulator:
                 s_offset16 = self._fetch_signed_word_le_from_program()
                 if rd_code is None or rbase_code is None or s_offset16 is None: raise ValueError(
                     "LOADFR operands missing or EOF.")
-
                 rd_name = self._get_reg_name(rd_code)
                 rbase_name = self._get_reg_name(rbase_code)
                 base_addr_val = self.registers[rbase_name]
                 effective_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-
                 if not self._is_valid_data_memory_word_address(effective_addr):
                     raise ValueError(
                         f"LOADFR: Invalid memory access at 0x{effective_addr:04X} (Base=0x{base_addr_val:04X}, Offset={s_offset16})")
-
                 value_loaded = self.data_memory[effective_addr]
                 self.registers[rd_name] = self._apply_16bit_limits(value_loaded)
                 self._update_flags(self.registers[rd_name], "LOADFR")
                 self.output_log.append(
-                    f"  LOADFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} "
-                    f"=> 0x{effective_addr:04X}] (Value=0x{self.registers[rd_name]:04X})")
+                    f"  LOADFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => 0x{effective_addr:04X}] (Value=0x{self.registers[rd_name]:04X})")
 
             elif opcode_str == "STORFR":
                 rt_code = self._fetch_byte_from_program()
@@ -223,21 +219,48 @@ class MicroprocessorSimulator:
                 s_offset16 = self._fetch_signed_word_le_from_program()
                 if rt_code is None or rbase_code is None or s_offset16 is None: raise ValueError(
                     "STORFR operands missing or EOF.")
-
                 rt_name = self._get_reg_name(rt_code)
                 rbase_name = self._get_reg_name(rbase_code)
                 val_to_store = self.registers[rt_name]
                 base_addr_val = self.registers[rbase_name]
                 effective_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-
                 if not self._is_valid_data_memory_word_address(effective_addr):
                     raise ValueError(
                         f"STORFR: Invalid memory access at 0x{effective_addr:04X} (Base=0x{base_addr_val:04X}, Offset={s_offset16})")
-
                 self.data_memory[effective_addr] = self._apply_16bit_limits(val_to_store)
                 self.output_log.append(
-                    f"  STORFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} "
-                    f"=> 0x{effective_addr:04X}] = {rt_name}(0x{val_to_store:04X})")
+                    f"  STORFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => 0x{effective_addr:04X}] = {rt_name}(0x{val_to_store:04X})")
+
+            # --- NEW INSTRUCTION: LOADI ---
+            elif opcode_str == "LOADI":
+                rd_code = self._fetch_byte_from_program()
+                rs_addr_code = self._fetch_byte_from_program()
+                if rd_code is None or rs_addr_code is None: raise ValueError("LOADI operands missing or EOF.")
+                rd_name = self._get_reg_name(rd_code)
+                rs_addr_name = self._get_reg_name(rs_addr_code)
+
+                address = self.registers[rs_addr_name]
+                val_from_mem = self._handle_mmio_read(address)
+
+                self.registers[rd_name] = self._apply_16bit_limits(val_from_mem)
+                self._update_flags(self.registers[rd_name], "LOADI")
+                self.output_log.append(
+                    f"  LOADI: {rd_name} = Mem[{rs_addr_name}(0x{address:04X})] (Value=0x{self.registers[rd_name]:04X})")
+
+            # --- NEW INSTRUCTION: STORI ---
+            elif opcode_str == "STORI":
+                rt_val_code = self._fetch_byte_from_program()
+                rs_addr_code = self._fetch_byte_from_program()
+                if rt_val_code is None or rs_addr_code is None: raise ValueError("STORI operands missing or EOF.")
+                rt_val_name = self._get_reg_name(rt_val_code)
+                rs_addr_name = self._get_reg_name(rs_addr_code)
+
+                address = self.registers[rs_addr_name]
+                val_to_store = self.registers[rt_val_name]
+
+                self._handle_mmio_write(address, val_to_store)
+                self.output_log.append(
+                    f"  STORI: Mem[{rs_addr_name}(0x{address:04X})] = {rt_val_name}(0x{val_to_store:04X})")
 
             elif opcode_str == "MOVFRSP":
                 rd_code = self._fetch_byte_from_program()
@@ -290,6 +313,7 @@ class MicroprocessorSimulator:
                 self._handle_mmio_write(addr16, self.registers[rs_name])
                 self.output_log.append(f"  OUTM: Mem[0x{addr16:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
 
+            # ... (Rest of the arithmetic, logical, and control flow instructions are unchanged) ...
             elif opcode_str == "ADD":
                 r1_code = self._fetch_byte_from_program();
                 r2_code = self._fetch_byte_from_program()
@@ -304,7 +328,6 @@ class MicroprocessorSimulator:
                 self.registers[r1_name] = res16
                 self._update_flags(res16, "ADD", carry_occurred=carry, overflow_occurred=overflow)
                 self.output_log.append(f"  ADD: {r1_name}(0x{v1:04X}) + {r2_name}(0x{v2:04X}) = 0x{res16:04X}")
-
             elif opcode_str == "SUB":
                 r1_code = self._fetch_byte_from_program();
                 r2_code = self._fetch_byte_from_program()
@@ -319,7 +342,6 @@ class MicroprocessorSimulator:
                 self.registers[r1_name] = res16
                 self._update_flags(res16, "SUB", carry_occurred=borrow, overflow_occurred=overflow)
                 self.output_log.append(f"  SUB: {r1_name}(0x{v1:04X}) - {r2_name}(0x{v2:04X}) = 0x{res16:04X}")
-
             elif opcode_str == "MUL":
                 r1_code = self._fetch_byte_from_program();
                 r2_code = self._fetch_byte_from_program()
@@ -332,7 +354,6 @@ class MicroprocessorSimulator:
                 self.registers[r1_name] = res16
                 self._update_flags(res16, "MUL", carry_occurred=carry, overflow_occurred=carry)
                 self.output_log.append(f"  MUL: {r1_name}(0x{v1:04X}) * {r2_name}(0x{v2:04X}) = 0x{res16:04X}")
-
             elif opcode_str == "INC":
                 rd_code = self._fetch_byte_from_program()
                 if rd_code is None: raise ValueError("INC operand missing or EOF.")
@@ -341,11 +362,10 @@ class MicroprocessorSimulator:
                 res_raw = v1 + 1;
                 res16 = self._apply_16bit_limits(res_raw)
                 carry = res_raw > MAX_IMMEDIATE_16BIT
-                overflow = (v1 == 0x7FFF)  # Overflow if 0x7FFF + 1 results in 0x8000 (positive to negative)
+                overflow = (v1 == 0x7FFF)
                 self.registers[rd_name] = res16
                 self._update_flags(res16, "INC", carry_occurred=carry, overflow_occurred=overflow)
                 self.output_log.append(f"  INC: {rd_name} from 0x{v1:04X} to 0x{res16:04X}")
-
             elif opcode_str == "DEC":
                 rd_code = self._fetch_byte_from_program()
                 if rd_code is None: raise ValueError("DEC operand missing or EOF.")
@@ -353,30 +373,22 @@ class MicroprocessorSimulator:
                 v1 = self.registers[rd_name];
                 res_raw = v1 - 1;
                 res16 = self._apply_16bit_limits(res_raw)
-                borrow = (v1 == 0)  # Borrow if 0 - 1 results in 0xFFFF
-                overflow = (v1 == 0x8000)  # Overflow if 0x8000 - 1 results in 0x7FFF (negative to positive)
+                borrow = (v1 == 0)
+                overflow = (v1 == 0x8000)
                 self.registers[rd_name] = res16
                 self._update_flags(res16, "DEC", carry_occurred=borrow, overflow_occurred=overflow)
                 self.output_log.append(f"  DEC: {rd_name} from 0x{v1:04X} to 0x{res16:04X}")
-
             elif opcode_str in ["AND", "OR", "XOR"]:
                 r1_code = self._fetch_byte_from_program();
                 r2_code = self._fetch_byte_from_program()
                 if r1_code is None or r2_code is None: raise ValueError(f"{opcode_str} operands missing or EOF.")
                 r1_name, r2_name = self._get_reg_name(r1_code), self._get_reg_name(r2_code)
                 v1, v2 = self.registers[r1_name], self.registers[r2_name]
-                res16 = 0
-                if opcode_str == "AND":
-                    res16 = v1 & v2
-                elif opcode_str == "OR":
-                    res16 = v1 | v2
-                elif opcode_str == "XOR":
-                    res16 = v1 ^ v2
+                res16 = (v1 & v2) if opcode_str == "AND" else (v1 | v2) if opcode_str == "OR" else (v1 ^ v2)
                 self.registers[r1_name] = self._apply_16bit_limits(res16)
                 self._update_flags(self.registers[r1_name], opcode_str, clear_carry_overflow_for_logical=True)
                 self.output_log.append(
                     f"  {opcode_str}: {r1_name}(0x{v1:04X}) op {r2_name}(0x{v2:04X}) = 0x{self.registers[r1_name]:04X}")
-
             elif opcode_str == "NOT":
                 rd_code = self._fetch_byte_from_program()
                 if rd_code is None: raise ValueError("NOT operand missing or EOF.")
@@ -384,7 +396,6 @@ class MicroprocessorSimulator:
                 self.registers[rd_name] = self._apply_16bit_limits(~self.registers[rd_name])
                 self._update_flags(self.registers[rd_name], "NOT", clear_carry_overflow_for_logical=True)
                 self.output_log.append(f"  NOT: {rd_name} = 0x{self.registers[rd_name]:04X}")
-
             elif opcode_str == "SHL":
                 rd_code = self._fetch_byte_from_program();
                 sa_byte = self._fetch_byte_from_program()
@@ -397,7 +408,6 @@ class MicroprocessorSimulator:
                 self._update_flags(res16, "SHL", carry_occurred=(carry_out if shift_amount > 0 else self.CF),
                                    overflow_occurred=False)
                 self.output_log.append(f"  SHL: {rd_name}(0x{v1:04X}) << {shift_amount} = 0x{res16:04X}")
-
             elif opcode_str == "SHR":
                 rd_code = self._fetch_byte_from_program();
                 sa_byte = self._fetch_byte_from_program()
@@ -410,7 +420,6 @@ class MicroprocessorSimulator:
                 self._update_flags(res16, "SHR", carry_occurred=(carry_out if shift_amount > 0 else self.CF),
                                    overflow_occurred=False)
                 self.output_log.append(f"  SHR: {rd_name}(0x{v1:04X}) >> {shift_amount} = 0x{res16:04X}")
-
             elif opcode_str in ["L_AND", "L_OR"]:
                 rd_c, rs1_c, rs2_c = self._fetch_byte_from_program(), self._fetch_byte_from_program(), self._fetch_byte_from_program()
                 if rd_c is None or rs1_c is None or rs2_c is None: raise ValueError(f"{opcode_str} operands missing")
@@ -420,7 +429,6 @@ class MicroprocessorSimulator:
                 self.registers[rd_n] = 1 if res_bool else 0
                 self._update_flags(self.registers[rd_n], opcode_str, clear_carry_overflow_for_logical=True)
                 self.output_log.append(f"  {opcode_str}: {rd_n} = ({rs1_n} op {rs2_n}) -> {self.registers[rd_n]}")
-
             elif opcode_str == "L_NOT":
                 rd_c, rs_c = self._fetch_byte_from_program(), self._fetch_byte_from_program()
                 if rd_c is None or rs_c is None: raise ValueError("L_NOT operands missing")
@@ -428,7 +436,6 @@ class MicroprocessorSimulator:
                 self.registers[rd_n] = 1 if self.registers[rs_n] == 0 else 0
                 self._update_flags(self.registers[rd_n], "L_NOT", clear_carry_overflow_for_logical=True)
                 self.output_log.append(f"  L_NOT: {rd_n} = !{rs_n} -> {self.registers[rd_n]}")
-
             elif opcode_str == "CMP":
                 r1_code = self._fetch_byte_from_program();
                 r2_code = self._fetch_byte_from_program()
@@ -443,50 +450,44 @@ class MicroprocessorSimulator:
                 self._update_flags(res16_for_flags, "CMP", carry_occurred=borrow, overflow_occurred=overflow,
                                    is_compare_op=True)
                 self.output_log.append(f"  CMP: {r1_name}(0x{v1:04X}) vs {r2_name}(0x{v2:04X}). Flags set.")
-
             elif opcode_str == "MOV":
                 rd_code = self._fetch_byte_from_program();
                 rs_code = self._fetch_byte_from_program()
                 if rd_code is None or rs_code is None: raise ValueError("MOV operands missing or EOF.")
                 rd_name, rs_name = self._get_reg_name(rd_code), self._get_reg_name(rs_code)
-                self.registers[rd_name] = self.registers[rs_name]  # Value is already 16-bit limited
+                self.registers[rd_name] = self.registers[rs_name]
                 self._update_flags(self.registers[rd_name], "MOV")
                 self.output_log.append(f"  MOV: {rd_name} = {rs_name}(0x{self.registers[rd_name]:04X})")
-
             elif opcode_str == "PUSH":
                 rs_code = self._fetch_byte_from_program()
                 if rs_code is None: raise ValueError("PUSH operand missing or EOF.")
                 rs_name = self._get_reg_name(rs_code)
-                if self.sp <= self.stack_limit:
-                    raise ValueError(
-                        f"Stack Overflow on PUSH. SP(0x{self.sp:04X}h) at/below Limit(0x{self.stack_limit:04X}h).")
+                if self.sp <= self.stack_limit: raise ValueError(
+                    f"Stack Overflow on PUSH. SP(0x{self.sp:04X}h) at/below Limit(0x{self.stack_limit:04X}h).")
                 self.sp = (self.sp - 1) & MAX_ADDRESS_16BIT
-                if not self._is_valid_data_memory_word_address(self.sp):  # Should also be caught by limit
-                    raise ValueError(f"PUSH: Invalid SP 0x{self.sp:04X}h after decrement.")
+                if not self._is_valid_data_memory_word_address(self.sp): raise ValueError(
+                    f"PUSH: Invalid SP 0x{self.sp:04X}h after decrement.")
                 val_to_push = self.registers[rs_name]
                 self.data_memory[self.sp] = self._apply_16bit_limits(val_to_push)
                 self.output_log.append(f"  PUSH: {rs_name}(0x{val_to_push:04X}) to Mem[SP=0x{self.sp:04X}h].")
-
             elif opcode_str == "POP":
                 rd_code = self._fetch_byte_from_program()
                 if rd_code is None: raise ValueError("POP operand missing or EOF.")
                 rd_name = self._get_reg_name(rd_code)
-                if self.sp >= self.stack_base:
-                    raise ValueError(
-                        f"Stack Underflow on POP. SP(0x{self.sp:04X}h) at/above Base(0x{self.stack_base:04X}h).")
-                if not self._is_valid_data_memory_word_address(self.sp):
-                    raise ValueError(f"POP: Invalid SP 0x{self.sp:04X}h before increment.")
+                if self.sp >= self.stack_base: raise ValueError(
+                    f"Stack Underflow on POP. SP(0x{self.sp:04X}h) at/above Base(0x{self.stack_base:04X}h).")
+                if not self._is_valid_data_memory_word_address(self.sp): raise ValueError(
+                    f"POP: Invalid SP 0x{self.sp:04X}h before increment.")
                 val_popped = self.data_memory[self.sp]
                 self.sp = (self.sp + 1) & MAX_ADDRESS_16BIT
                 self.registers[rd_name] = self._apply_16bit_limits(val_popped)
                 self._update_flags(self.registers[rd_name], "POP")
                 self.output_log.append(
                     f"  POP: {rd_name} = Mem[SP(old)=0x{(self.sp - 1) & MAX_ADDRESS_16BIT:04X}h] (Val=0x{val_popped:04X}). New SP=0x{self.sp:04X}h.")
-
             elif opcode_str == "CALL":
                 target_addr16 = self._fetch_word_le_from_program()
                 if target_addr16 is None: raise ValueError("CALL target address missing or EOF.")
-                ret_addr = self.program_counter  # PC is already past CALL's own bytes
+                ret_addr = self.program_counter
                 if self.sp <= self.stack_limit: raise ValueError("Stack Overflow on CALL for return address.")
                 self.sp = (self.sp - 1) & MAX_ADDRESS_16BIT
                 if not self._is_valid_data_memory_word_address(self.sp): raise ValueError(
@@ -495,7 +496,6 @@ class MicroprocessorSimulator:
                 self.program_counter = self._apply_16bit_limits(target_addr16)
                 self.output_log.append(
                     f"  CALL: Pushed RetAddr(0x{ret_addr:04X}h) to Stack[SP=0x{self.sp:04X}h]. JMP to 0x{self.program_counter:04X}h.")
-
             elif opcode_str == "RET":
                 if self.sp >= self.stack_base: raise ValueError("Stack Underflow on RET.")
                 if not self._is_valid_data_memory_word_address(self.sp): raise ValueError(
@@ -505,15 +505,13 @@ class MicroprocessorSimulator:
                 self.program_counter = self._apply_16bit_limits(ret_addr_from_stack)
                 self.output_log.append(
                     f"  RET: Popped RetAddr(0x{self.program_counter:04X}h) from Stack[SP(old)=0x{(self.sp - 1) & MAX_ADDRESS_16BIT:04X}h]. JMP.")
-
-            elif opcode_str.startswith("J"):  # All other Jumps (JMP, Jcc, JMPZ, JMPN)
-                is_reg_cond_jmp = opcode_str in ["JMPZ", "JMPN"]
+            elif opcode_str.startswith("J"):
+                is_reg_cond_jmp = opcode_str in ["JMPZ", "JMPN"];
                 reg_c = None
                 if is_reg_cond_jmp: reg_c = self._fetch_byte_from_program()
                 target_addr16 = self._fetch_word_le_from_program()
                 if target_addr16 is None or (is_reg_cond_jmp and reg_c is None): raise ValueError(
                     f"{opcode_str} operands missing or EOF.")
-
                 condition_met = False;
                 log_cond_detail = ""
                 if opcode_str == "JMP":
@@ -522,8 +520,8 @@ class MicroprocessorSimulator:
                     rn = self._get_reg_name(reg_c); condition_met = (
                                 self.registers[rn] == 0); log_cond_detail = f"({rn}==0)"
                 elif opcode_str == "JMPN":
-                    rn = self._get_reg_name(reg_c); condition_met = (self.registers[
-                                                                         rn] & 0x8000) != 0; log_cond_detail = f"({rn}<0)"
+                    rn = self._get_reg_name(reg_c); condition_met = (
+                                (self.registers[rn] & 0x8000) != 0); log_cond_detail = f"({rn}<0)"
                 elif opcode_str == "JE":
                     condition_met = self.ZF;  log_cond_detail = "(ZF=1)"
                 elif opcode_str == "JNE":
@@ -540,7 +538,6 @@ class MicroprocessorSimulator:
                     condition_met = self.OF;  log_cond_detail = "(OF=1)"
                 elif opcode_str == "JNO":
                     condition_met = not self.OF;log_cond_detail = "(OF=0)"
-
                 if condition_met:
                     self.program_counter = self._apply_16bit_limits(target_addr16)
                     self.output_log.append(
@@ -552,7 +549,6 @@ class MicroprocessorSimulator:
                     f"  SIMULATOR ERROR: Opcode '{opcode_str}' (0x{opcode_byte:02X}) defined but not implemented.")
                 self.halted = True;
                 return False
-
         except ValueError as ve:
             self.output_log.append(
                 f"  RUNTIME ERROR @PC=0x{initial_pc:04X}h Op='{opcode_str}' (0x{opcode_byte:02X}): {ve}")
@@ -565,10 +561,10 @@ class MicroprocessorSimulator:
             self.output_log.append(traceback.format_exc())
             self.halted = True;
             return False
-
         return True
 
     def run_program(self, binary_source_file):
+        # ... (This method is unchanged) ...
         self._reset_state()
         if not self.load_binary_program(binary_source_file):
             self.output_log.append(f"--- Sim Aborted: Load fail '{binary_source_file}' ---")
@@ -576,17 +572,14 @@ class MicroprocessorSimulator:
         if not self.program_bytes:
             self.output_log.append("Sim: Program empty. Halted.")
             self.halted, self.clean_halt = True, True
-
         max_cycles = (len(self.program_bytes) * 50) + 5000;
         cycles = 0
         while not self.halted and cycles < max_cycles:
             if not self.execute_cycle(): break
             cycles += 1
-
         if cycles >= max_cycles and not self.halted:
             self.output_log.append(f"Sim: MAX CYCLES ({max_cycles}) REACHED! Halting.")
             self.halted = True
-
         status = "CPU " + ("HALTED cleanly" if self.clean_halt else "STOPPED")
         self.output_log.append(f"--- Sim Finished ({status}) ({cycles} cycles) ---")
         self.output_log.append(f"Final PC: 0x{self.program_counter:04X}h")
@@ -597,6 +590,7 @@ class MicroprocessorSimulator:
         return "\n".join(self.output_log)
 
     def print_final_state(self):
+        # ... (This method is unchanged) ...
         print("\n--- Final Simulator State (print_final_state) ---")
         for i in sorted(REG_NAMES.keys()):
             print(
@@ -620,47 +614,40 @@ class MicroprocessorSimulator:
                     mark = " <-- SP (topmost valid item if POP occurs)"
                 print(f"  Mem[0x{i:04X}h]: 0x{self.data_memory[i]:04X}{mark}");
                 printed_mem_count += 1
-                if printed_mem_count >= 15 and printed_mem_count > 5: break  # Show more stack if few globals
+                if printed_mem_count >= 15 and printed_mem_count > 5: break
         if printed_mem_count == 0: print("  (All sampled mem is zero or stack empty at base)")
         print("-------------------------------------------")
 
 
 if __name__ == "__main__":
     from simple_assembler import SimpleAssembler
+
+    # Test case now includes LOADI and STORI
     test_sal_all_new_isa = """
-    LOAD R0, #0x1234    // Test value for SP
-    MOVTOSP R0          // SP = R0 (0x1234)
-    MOVFRSP R1          // R1 = SP (should be 0x1234)
-    OUT R1              // Expected: 0x1234 (4660)
-
-    LOAD R5, #0x0A00    // R5 = Frame Pointer base
-    LOAD R0, #99        // Value to store
-    STORFR R0, R5, #2   // Mem[0x0A00 + 2] = 99
-    LOADFR R2, R5, #2   // R2 = Mem[0x0A00 + 2]
-    OUT R2              // Expected: 99
-
-    STORFR R0, R5, #-1  // Mem[0x0A00 - 1] = 99 => 0x09FF
-    LOADFR R3, R5, #-1
-    OUT R3              // Expected: 99
+    // Test new indirect instructions
+    LOAD R0, #0x1100      // R0 will hold an address
+    LOAD R1, #999         // R1 holds the value to store
+    STORI R1, R0          // Mem[0x1100] = 999
+    LOADI R2, R0          // R2 = Mem[0x1100]
+    OUT R2                // Expected: 999
     HALT
     """
     asm_test = SimpleAssembler()
     bin_f = "test_full_isa_sim.bin"
-    asm_f = "test_full_isa_sim.asm" # Corrected semicolon to dot
+    asm_f = "test_full_isa_sim.asm"
 
     print(f"--- Assembling SAL for full ISA simulator test: {bin_f} ---")
     if asm_test.assemble_to_file(test_sal_all_new_isa, bin_f, asm_f):
         print(f"\n--- Testing Simulator with full ISA extensions '{bin_f}' ---")
-        sim = MicroprocessorSimulator(data_memory_size=4096, stack_size=256)
+        sim = MicroprocessorSimulator(data_memory_size=8192, stack_size=256)
         log = sim.run_program(bin_f)
         print("\nSimulation Log:")
         print(log)
         sim.print_final_state()
     else:
         print(f"Failed to assemble {bin_f}. Errors:")
-        # Corrected error printing:
         if asm_test.errors:
-            for error_message in asm_test.errors: # Use a consistent loop variable
+            for error_message in asm_test.errors:
                 print(f"  - {error_message}")
         else:
             print("  (No specific errors reported by assembler object)")
