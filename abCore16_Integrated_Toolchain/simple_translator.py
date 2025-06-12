@@ -1,4 +1,4 @@
-# simple_compiler.py
+# simple_translator.py
 import re
 # Import from the new definitions file
 from abcore16_defs import (
@@ -7,11 +7,11 @@ from abcore16_defs import (
 )
 
 
-class SimpleCompiler:
+class SimpleTranslator:
     def __init__(self):
         # SSL Regex, SAL Template, [Operand Types: R=Reg, V16=16b Val, V8=8b Val, A16=16b Addr, L=Label, N=None for no ops]
         # The SAL mnemonics in the template should match the keys in abcore16_defs.OPCODES
-        self.compilation_rules = [
+        self.translation_rules = [
             # SSL instruction regexes remain the same as your last correct version
             (re.compile(r"SET\s+(R[0-7])\s+(0x[0-9A-Fa-f]+|\d+)", re.IGNORECASE), "LOAD {0}, #{1}", ['R', 'V16']),
             (re.compile(r"MOV\s+(R[0-7])\s+(R[0-7])", re.IGNORECASE), "MOV {0}, {1}", ['R', 'R']),
@@ -68,20 +68,20 @@ class SimpleCompiler:
         line_text = line_text.split('//', 1)[0]
         return line_text.strip()
 
-    def compile_line(self,
+    def translate_line(self,
                      ssl_line_processed):  # Logic for validation uses self attributes which are now from abcore16_defs
         # ... (Label definition logic remains the same) ...
-        label_def_pattern, _, label_def_op_type = self.compilation_rules[-1]
+        label_def_pattern, _, label_def_op_type = self.translation_rules[-1]
         if label_def_op_type == ['L_DEF'] and label_def_pattern.fullmatch(ssl_line_processed):
             label_name = label_def_pattern.fullmatch(ssl_line_processed).group(1).upper()
             return f"{label_name}:", "SUCCESS"
 
-        for p_idx, (pattern, template, operand_types) in enumerate(self.compilation_rules):
+        for p_idx, (pattern, template, operand_types) in enumerate(self.translation_rules):
             if operand_types == ['N']:  # No operands instructions
                 if pattern.fullmatch(ssl_line_processed):
                     return template, "SUCCESS"
 
-        for pattern, template, operand_types in self.compilation_rules:
+        for pattern, template, operand_types in self.translation_rules:
             if operand_types == ['L_DEF'] or operand_types == ['N']:
                 continue
 
@@ -138,11 +138,11 @@ class SimpleCompiler:
 
         return f"Unknown command or invalid syntax: '{ssl_line_processed}'", "ERROR"
 
-    def compile_program(self, ssl_program_string):  # No functional change needed here
-        # ... (rest of compile_program remains the same as your last correct version) ...
-        print("--- Starting Compilation ---")
+    def translate_program(self, ssl_program_string):  # No functional change needed here
+        # ... (rest of translate_program remains the same as your last correct version) ...
+        print("--- Starting Translation ---")
         lines = ssl_program_string.strip().split('\n')
-        compiled_assembly_lines = []
+        translated_assembly_lines = []
         has_errors = False
         for i, line_text_orig in enumerate(lines):
             ssl_line_number = i + 1
@@ -151,16 +151,16 @@ class SimpleCompiler:
             if not processed_line:
                 if line_text_orig.strip().startswith("//"):
                     # print(f"  Full-line SSL Comment: \"{line_text_orig.strip()}\"") # Verbose
-                    compiled_assembly_lines.append(f"; {line_text_orig.strip()}")
+                    translated_assembly_lines.append(f"; {line_text_orig.strip()}")
                 # else: print("  Skipping empty or whitespace-only line after preprocessing.") # Verbose
                 continue
             # print(f"  Command part for compilation: \"{processed_line}\"") # Verbose
-            assembly_code_or_error_msg, status = self.compile_line(processed_line)
+            assembly_code_or_error_msg, status = self.translate_line(processed_line)
             if status == "ERROR":
                 has_errors = True
                 full_error_message = f"SSL Line {ssl_line_number}: {assembly_code_or_error_msg} (Original: \"{line_text_orig.strip()}\")"
-                print(f"  COMPILER ERROR: {full_error_message}")
-                compiled_assembly_lines.append(
+                print(f"  Translator ERROR: {full_error_message}")
+                translated_assembly_lines.append(
                     f"; ERROR at SSL Line {ssl_line_number}: {assembly_code_or_error_msg} (Source: {line_text_orig.strip()})")
             elif status == "SUCCESS":
                 sal_instruction_part = assembly_code_or_error_msg
@@ -173,27 +173,27 @@ class SimpleCompiler:
                                                                                                           "HALT"]
                 current_sal_line_to_add = f"{sal_instruction_part}{comment_to_append}" if not is_simple_no_op_or_label else sal_instruction_part
 
-                compiled_assembly_lines.append(current_sal_line_to_add)
+                translated_assembly_lines.append(current_sal_line_to_add)
                 if is_simple_no_op_or_label and comment_to_append:  # Add comment on new line for labels/no-ops
-                    compiled_assembly_lines.append(f"; // {comment_to_append.replace('; //', '').strip()}")
+                    translated_assembly_lines.append(f"; // {comment_to_append.replace('; //', '').strip()}")
                 # print(f"  Generated SAL: \"{current_sal_line_to_add}\"") # Verbose
         # print("\n--- Compilation Finished ---") # Verbose
-        if has_errors: print("COMPILER: Compilation finished with errors.")
+        if has_errors: print("TRANSLATOR: Translation finished with errors.")
         # else: print("COMPILER: Compilation successful.") # Verbose
-        final_sal_lines = [line for line in compiled_assembly_lines if line.strip()]
+        final_sal_lines = [line for line in translated_assembly_lines if line.strip()]
         return "\n".join(final_sal_lines), has_errors
 
 
 # Standalone test - no change
 if __name__ == "__main__":
-    compiler = SimpleCompiler()
+    translator = SimpleTranslator()
     test_ssl_logical_ops = """
     SET R0 5
     L_AND R3, R0, R2
     HALT
     """
-    print(f"Compiling SSL (using abcore16_defs):\n{test_ssl_logical_ops}")
-    compiled_sal, had_errors = compiler.compile_program(test_ssl_logical_ops)
-    print("\nCompiled SAL:")
+    print(f"Translating SSL (using abcore16_defs):\n{test_ssl_logical_ops}")
+    compiled_sal, had_errors = translator.translate_program(test_ssl_logical_ops)
+    print("\nTranslated SAL:")
     print(compiled_sal)
-    if had_errors: print("\nCompiler reported errors.")
+    if had_errors: print("\nTranslator reported errors.")
