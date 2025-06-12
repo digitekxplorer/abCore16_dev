@@ -4,23 +4,24 @@ import os
 import sys
 from ply.lex import lex
 from ply.yacc import yacc
-# import logging # No longer needed if parse(debug=True) is off
+# import logging
 
 from ast_nodes import (
     Node, ProgramNode, StatementNode, AssignmentNode, PrintNode, IfNode, WhileNode,
     ExpressionNode, NumberNode, IdentifierNode, BinaryOpNode, UnaryOpNode,
     FunctionDefinitionNode, ReturnNode,
     ExpressionStatementNode, FunctionCallNode,
-    ForNode, VarDeclNode
+    ForNode, VarDeclNode,
+    ArrayDeclNode, ArrayAccessNode # <-- Imports are already correct
 )
 
 # --- Tokenizer (Lexer) Definition ---
-# ... (tokens, t_ignore, t_rules, reserved, t_IDENTIFIER, t_NUMBER, etc. - NO CHANGES HERE) ...
+# This section is already correct from the previous step and has no new changes.
 tokens = (
     'NUMBER', 'IDENTIFIER',
     'PLUS', 'MINUS', 'TIMES',
     'ASSIGN', 'SEMI',
-    'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'COMMA',
+    'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA',
     'EQ', 'NEQ', 'LE', 'GE', 'LT', 'GT',
     'AND_LOGICAL', 'OR_LOGICAL', 'NOT_LOGICAL',
     'PRINT', 'IF', 'ELSE', 'WHILE', 'FOR',
@@ -46,6 +47,8 @@ t_LPAREN = r'\('
 t_RPAREN = r'\)'
 t_LBRACE = r'\{'
 t_RBRACE = r'\}'
+t_LBRACKET = r'\['
+t_RBRACKET = r'\]'
 t_COMMA = r','
 
 reserved = {
@@ -85,10 +88,9 @@ def t_error(t):
     t.lexer.skip(1)
 
 
-lexer_ply = lex(debug=0)  # Lexer debug usually kept at 0 unless debugging tokenization
+lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
-# ... (precedence, start symbol - NO CHANGES HERE) ...
 precedence = (
     ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'),
     ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
@@ -98,11 +100,6 @@ precedence = (
 start = 'program'
 
 
-# ... (All your p_rule functions: p_program, p_top_level_declaration_list, ...,
-#      p_for_initializer, p_for_initializer_opt,
-#      p_for_cond_update_item, p_for_cond_update_opt, p_for_statement,
-#      p_expression, ..., p_empty - NO CHANGES TO THE RULE LOGIC ITSELF) ...
-# --- Make sure any "print(f"DEBUG: p_expression_statement...")" lines ARE REMOVED from p_rules ---
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
@@ -134,13 +131,23 @@ def p_statement_for_global_scope(p):
     p[0] = p[1]
 
 
+# --- MODIFICATION 1: Update variable declaration to handle arrays ---
 def p_variable_declaration_statement(p):
     '''variable_declaration_statement : VAR IDENTIFIER SEMI
+                                      | VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
                                       | VAR IDENTIFIER ASSIGN expression SEMI'''
-    if len(p) == 4:
-        p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
-    else:
+    if len(p) == 7:  # Array declaration: VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
+        size = p[4]
+        if not isinstance(size, int) or size <= 0:
+            # Note: A robust implementation would use p.error() to halt parsing.
+            # For now, we print a fatal error message.
+            print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
+        p[0] = ArrayDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
+    elif len(p) == 6:  # Variable with initializer: VAR IDENTIFIER ASSIGN expression SEMI
         p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+    elif len(p) == 4:  # Simple variable declaration: VAR IDENTIFIER SEMI
+        p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+# --- END MODIFICATION 1 ---
 
 
 def p_function_definition(p):
@@ -191,7 +198,6 @@ def p_statement(p):
 
 def p_expression_statement(p):
     '''expression_statement : expression SEMI'''
-    # REMOVE DEBUG PRINT: print(f"DEBUG: p_expression_statement: p[1] is {p[1]!r}, type is {type(p[1])}")
     p[0] = ExpressionStatementNode(p[1], line_no=p.slice[1].lineno if hasattr(p.slice[1], 'lineno') else p.lineno(1))
 
 
@@ -211,9 +217,24 @@ def p_empty_statement(p):
     p[0] = None
 
 
+# --- MODIFICATION 2: Update assignment to handle array access as a target ---
 def p_assignment_statement(p):
-    '''assignment_statement : IDENTIFIER ASSIGN expression SEMI'''
-    p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
+    '''assignment_statement : IDENTIFIER ASSIGN expression SEMI
+                            | array_access ASSIGN expression SEMI'''
+    if isinstance(p[1], str):  # This is the IDENTIFIER ASSIGN ... rule
+        p[0] = AssignmentNode(
+            target_name=IdentifierNode(p[1], line_no=p.lineno(1)),
+            value_expr=p[3],
+            line_no=p.lineno(2)
+        )
+    else:  # This is the array_access ASSIGN ... rule
+        # p[1] is already a complete ArrayAccessNode from p_array_access
+        p[0] = AssignmentNode(
+            target_name=p[1],
+            value_expr=p[3],
+            line_no=p.lineno(2)
+        )
+# --- END MODIFICATION 2 ---
 
 
 def p_print_statement(p):
@@ -291,23 +312,18 @@ def p_for_statement(p):
         if isinstance(init_content, VarDeclNode):
             init_node_for_fornode = init_content
         elif isinstance(init_content, (ExpressionNode, AssignmentNode)):
-            line_num = init_content.line_no if hasattr(init_content,
-                                                       'line_no') and init_content.line_no is not None else p.lineno(1)
+            line_num = init_content.line_no if hasattr(init_content,'line_no') and init_content.line_no is not None else p.lineno(1)
             init_node_for_fornode = ExpressionStatementNode(init_content, line_no=line_num)
         else:
             init_node_for_fornode = None
-
     condition_expr_node = cond_content
     update_stmt_node = None
     if update_content is not None:
         if isinstance(update_content, (ExpressionNode, AssignmentNode)):
-            line_num = update_content.line_no if hasattr(update_content,
-                                                         'line_no') and update_content.line_no is not None else p.lineno(
-                1)
+            line_num = update_content.line_no if hasattr(update_content,'line_no') and update_content.line_no is not None else p.lineno(1)
             update_stmt_node = ExpressionStatementNode(update_content, line_no=line_num)
         else:
             update_stmt_node = None
-
     p[0] = ForNode(init_node_for_fornode, condition_expr_node, update_stmt_node, body_node, line_no=p.lineno(1))
 
 
@@ -320,7 +336,6 @@ def p_expression(p):
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
 
-# ... (p_expression_and through p_primary_expression - NO CHANGES HERE) ...
 def p_expression_and(p):
     '''expression_and : expression_and AND_LOGICAL expression_equality
                       | expression_equality'''
@@ -381,22 +396,35 @@ def p_expression_unary(p):
         p[0] = UnaryOpNode(p[1], p[2], line_no=p.slice[1].lineno)
 
 
+# --- MODIFICATION 3: Update primary_expression to include array access ---
 def p_primary_expression(p):
     '''primary_expression : NUMBER
                           | IDENTIFIER
                           | LPAREN expression RPAREN
-                          | function_call_actual'''
+                          | function_call_actual
+                          | array_access'''
     if p.slice[1].type == 'NUMBER':
         p[0] = NumberNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'IDENTIFIER':
         p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'LPAREN':
         p[0] = p[2]
-    else:
+    else: # This covers function_call_actual and the new array_access
         p[0] = p[1]
+# --- END MODIFICATION 3 ---
 
 
-# ... (p_function_call_actual, p_argument_list_opt, p_argument_list, p_empty - NO CHANGES HERE) ...
+# --- MODIFICATION 4: Add new grammar rule for array_access ---
+def p_array_access(p):
+    '''array_access : IDENTIFIER LBRACKET expression RBRACKET'''
+    p[0] = ArrayAccessNode(
+        name_node=IdentifierNode(p[1], line_no=p.lineno(1)),
+        index_expr_node=p[3],
+        line_no=p.lineno(1)
+    )
+# --- END MODIFICATION 4 ---
+
+
 def p_function_call_actual(p):
     '''function_call_actual : IDENTIFIER LPAREN argument_list_opt RPAREN'''
     p[0] = FunctionCallNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
@@ -434,30 +462,21 @@ def p_error(p):
     else:
         print(f"PLY Parser: Syntax error at EOF.")
 
-
-# Changed debug to 0 to silence parser.out generation for normal runs.
-# write_tables can be True, tabmodule ensures c_ssl_parsetab.py is used/generated.
-# parser_ply = yacc(debug=0, write_tables=True, tabmodule="c_ssl_parsetab")
-# REMOVED: print("DEBUG: c_ply_compiler.py: parser_ply object created/recreated.")
+# This section and below are unchanged
 parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
 
 from code_generator import SALCodeGenerator
-
 
 def compile_c_ssl_string_to_sal(c_ssl_code_string):
     global _ply_parser_errors_found
     _ply_parser_errors_found = False
     lexer_ply.lineno = 1
 
-    # REMOVED: print("\nPLY: Attempting to parse with runtime debugging...")
-    # Changed debug to False for normal operation
     ast = parser_ply.parse(input=c_ssl_code_string, lexer=lexer_ply, tracking=True, debug=False)
-    # REMOVED: print("PLY: Parsing attempt finished.\n")
 
     if _ply_parser_errors_found or not ast:
         if not ast and c_ssl_code_string.strip() and not _ply_parser_errors_found:
-            print(
-                "C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported by p_error. Check grammar or yacc debug output.")
+            print("C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported by p_error. Check grammar or yacc debug output.")
         elif not ast and not c_ssl_code_string.strip():
             print("C-SSL Info: Input empty or comments only.");
             return "// No effective input", False
@@ -490,34 +509,19 @@ def compile_c_ssl_string_to_sal(c_ssl_code_string):
 
 
 if __name__ == '__main__':
-    # ... (if __name__ block can remain as is for your testing) ...
     test_ssl_for_var_init_content = """
     func main() {
-        var sum_total; 
+        var sum_total;
         sum_total = 0;
-
-        for (var i = 1; i <= 2; i = i + 1) { 
-            print i; 
-            sum_total = sum_total + i;
-        }
-
-        print 1000; 
-
-        for (var j = 5; j >= 3; j = j - 1) { 
-            print j; 
-            sum_total = sum_total + j;
-        }
-
+        for (var i = 1; i <= 2; i = i + 1) { print i; sum_total = sum_total + i; }
+        print 1000;
+        for (var j = 5; j >= 3; j = j - 1) { print j; sum_total = sum_total + j; }
         print 2000;
-        print sum_total; 
-
-        var k; 
-        for (k = 10; k < 12; k = k+1) { 
-            print k; 
-        }
+        print sum_total;
+        var k;
+        for (k = 10; k < 12; k = k+1) { print k; }
     }
     """
-
     ssl_input_file_path = "test_for_var_init_ply_direct.ssl"
     sal_output_file_path = "SAL_from_c_ply_for_var_init_direct.sal"
 
@@ -530,7 +534,6 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print(f"\n--- Running c_ply_compiler.py (For Loop Var Init Test) directly from '{ssl_input_file_path}' ---")
-
     generated_sal, had_errors = compile_c_ssl_string_to_sal(test_ssl_for_var_init_content)
 
     if had_errors or generated_sal is None:
@@ -540,11 +543,8 @@ if __name__ == '__main__':
         final_sal_for_test = generated_sal.strip()
         if final_sal_for_test and not final_sal_for_test.upper().endswith("HALT"):
             final_sal_for_test += "\nHALT // Auto-added by c_ply_compiler.py __main__ for testing"
-            print("(Appended HALT for standalone SAL testing in c_ply_compiler.py __main__)")
         elif not final_sal_for_test:
             final_sal_for_test = "HALT // Program was empty, HALT added by c_ply_compiler.py __main__"
-            print("(Program was empty, HALT added for standalone SAL testing in c_ply_compiler.py __main__)")
-
         try:
             with open(sal_output_file_path, 'w') as f:
                 f.write(final_sal_for_test)
