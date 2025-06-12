@@ -4,6 +4,8 @@
 # python main.py --sal-input SAL_code_gen.sal
 # or from C-like file
 # python main.py test_program.ssl
+# or extensive core16-C testing
+# python main.py test_c_like_features.ssl
 
 import os
 import traceback
@@ -11,7 +13,7 @@ import sys
 import argparse
 
 # Toolchain components
-from simple_compiler import SimpleCompiler
+from simple_translator import SimpleTranslator
 from simple_assembler import SimpleAssembler
 from simple_disassembler import SimpleDisassembler
 from microprocessor_simulator import MicroprocessorSimulator
@@ -98,12 +100,12 @@ def run_full_toolchain_from_original_ssl(
     print(
         f"==============================================\n  STARTING ORIGINAL SSL (.ab) TOOLCHAIN FOR: {source_description}  \n==============================================")
 
-    compiler = SimpleCompiler()
-    print("\n--- COMPILER (simple_compiler.py): Compiling Original SSL ---")
-    compiled_sal_string, compilation_had_errors = compiler.compile_program(ssl_ab_code)
+    compiler = SimpleTranslator()
+    print("\n--- TRANSLATOR (simple_translator.py): Translating Original SSL ---")
+    compiled_sal_string, compilation_had_errors = compiler.translate_program(ssl_ab_code)
 
     if compilation_had_errors:
-        print_toolchain_failure(source_description, "COMPILATION (Original SSL)");
+        print_toolchain_failure(source_description, "TRANSLATION (Original SSL)");
         return False
     if not compiled_sal_string or not any(
             line.strip() and not line.strip().startswith(tuple([';', '//'])) for line in
@@ -111,12 +113,12 @@ def run_full_toolchain_from_original_ssl(
         print_toolchain_failure(source_description, "EMPTY SAL (from Original SSL)");
         return False
 
-    # print("\n--- COMPILER (simple_compiler.py): Generated SAL ---") # Verbose
+    # print("\n--- COMPILER (simple_translator.py): Generated SAL ---") # Verbose
     # print(compiled_sal_string) # Verbose
 
     return run_toolchain_from_sal(
         compiled_sal_string,
-        f"Compiled from {source_description}",
+        f"Translated from {source_description}",
         output_binary_file, output_listing_file, output_disassembled_file,
         sim_data_memory_size, sim_stack_size, sim_program_memory_capacity
     )
