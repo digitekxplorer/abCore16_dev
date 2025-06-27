@@ -26,6 +26,14 @@ except ImportError:
     print("       Ensure 'c_ply_compiler.py' is in the same directory and has no import errors itself.")
     sys.exit(1)
 
+# --- IMPORT FPGA MEMORY FILE GENERATOR ---
+try:
+    from generate_mem_files import generate_mem_files
+except ImportError:
+    print("INFO: Could not import 'generate_mem_files' from 'generate_mem_files.py'.")
+    print("      FPGA memory file generation (.coe, .hex) will be skipped.")
+    generate_mem_files = None  # Define as None so calls to it can be checked
+
 
 def run_toolchain_from_sal(
         sal_code_string,
@@ -33,6 +41,7 @@ def run_toolchain_from_sal(
         output_binary_file="program.bin",
         output_listing_file="program.asm",
         output_disassembled_file="program_disassembled.sal",
+        output_sim_txt_file="sim_output.txt",
         sim_data_memory_size=8192,
         sim_stack_size=256,
         sim_program_memory_capacity=65536
@@ -49,6 +58,25 @@ def run_toolchain_from_sal(
     if not assembler.assemble_to_file(sal_code_string, output_binary_file, output_listing_file):
         print_toolchain_failure(source_description, "ASSEMBLY");
         return False
+
+    # --- GENERATE FPGA MEMORY FILES AFTER SUCCESSFUL ASSEMBLY ---
+    if generate_mem_files:
+        print("\n--- FPGA MEMORY FILE GENERATOR ---")
+        try:
+            # The generate_mem_files function will print its own success/error messages.
+            # We use the program memory capacity from the main script to ensure consistency.
+            generate_mem_files(
+                input_bin_file=output_binary_file,
+                memory_size=sim_program_memory_capacity,
+                memory_width=8  # Hardcoded to 8 as per the script's constraint
+            )
+        except Exception as e:
+            # Catch any unexpected errors from the imported script
+            print(f"FPGA GEN: An unexpected error occurred during .coe/.hex generation: {e}")
+    else:
+        # This message appears if the initial import failed
+        print("\n--- FPGA MEMORY FILE GENERATOR (SKIPPED) ---")
+
 
     disassembler = SimpleDisassembler()
     print(f"\n--- DISASSEMBLER: Disassembling '{output_binary_file}' ---")
@@ -69,17 +97,43 @@ def run_toolchain_from_sal(
         print(f"DISASSEMBLER: An error occurred during disassembly - {e_dis}");
         traceback.print_exc()
 
-    # --- CORRECTED SIMULATOR INSTANTIATION ---
     simulator = MicroprocessorSimulator(
         data_memory_size=sim_data_memory_size,  # Use the function parameter
         stack_size=sim_stack_size,  # Use the function parameter (simulator expects 'stack_size')
         program_memory_capacity=sim_program_memory_capacity  # Use the function parameter
     )
-    # --- END CORRECTION ---
 
     print("\n--- SIMULATOR: Loading and Running Binary File ---")
     simulation_log = simulator.run_program(output_binary_file)
-    print("\n--- SIMULATOR: Simulation Log ---");
+
+    try:
+        # Build the full content for the output file in the new order
+        file_content_parts = [
+            "--- SIMULATOR: MMIO OUTPUT ---"
+        ]
+
+        if simulator.mmio_output_lines:
+            file_content_parts.append("\n".join(simulator.mmio_output_lines))
+        else:
+            file_content_parts.append("// No MMIO output was generated.")
+
+        # Add a separator and the detailed simulation log
+        file_content_parts.extend([
+            "\n",
+            "--- SIMULATOR: Simulation Log ---",
+            simulation_log if simulation_log else "// No simulation log generated."
+        ])
+
+        # Join all parts and write to the file
+        final_file_content = "\n".join(file_content_parts) + "\n"
+
+        with open(output_sim_txt_file, 'w') as f_out:
+            f_out.write(final_file_content)
+        print(f"SIMULATOR: Full simulation output successfully written to '{output_sim_txt_file}'")
+    except IOError as e:
+        print(f"SIMULATOR: ERROR - Could not write simulation output to '{output_sim_txt_file}': {e}")
+
+    print("\n--- SIMULATOR: Simulation Log (Console) ---");
     print(simulation_log if simulation_log else "// No simulation log generated.")
     print("\n--- SIMULATOR: Final Simulator Register States ---");
     simulator.print_final_state()
@@ -93,6 +147,7 @@ def run_full_toolchain_from_original_ssl(
         output_binary_file="program.bin",
         output_listing_file="program.asm",
         output_disassembled_file="program_disassembled.sal",
+        output_sim_txt_file="sim_output.txt",
         sim_data_memory_size=8192,
         sim_stack_size=256,
         sim_program_memory_capacity=65536
@@ -120,6 +175,7 @@ def run_full_toolchain_from_original_ssl(
         compiled_sal_string,
         f"Translated from {source_description}",
         output_binary_file, output_listing_file, output_disassembled_file,
+        output_sim_txt_file,
         sim_data_memory_size, sim_stack_size, sim_program_memory_capacity
     )
 
@@ -131,6 +187,7 @@ def run_full_toolchain_from_c_ssl(
         output_binary_file="program.bin",
         output_listing_file="program.asm",
         output_disassembled_file="program_disassembled.sal",
+        output_sim_txt_file="sim_output.txt",
         sim_data_memory_size=8192,
         sim_stack_size=256,
         sim_program_memory_capacity=65536
@@ -171,6 +228,7 @@ def run_full_toolchain_from_c_ssl(
         sal_for_assembler,
         f"Compiled from {source_description} (via PLY)",
         output_binary_file, output_listing_file, output_disassembled_file,
+        output_sim_txt_file,
         sim_data_memory_size, sim_stack_size, sim_program_memory_capacity
     )
 
@@ -212,11 +270,19 @@ if __name__ == "__main__":
     output_binary_file = f"{base_filename}.bin"
     output_listing_file = f"{base_filename}.asm"
     output_disassembled_file = f"{base_filename}_disassembled.sal"
+    output_sim_txt_file = f"{base_filename}.txt"  # New output file for simulator text
     ply_generated_sal_intermediate_file = f"{base_filename}_from_ply.sal"
 
+    # Note: The 'size' argument in generate_mem_files.py corresponds to program memory.
+    # We will use this constant for both the simulator's program memory capacity and
+    # the desired size of the FPGA memory files.
+    SIM_PROGRAM_MEMORY_SIZE_BYTES = 8192  # Let's match the default from your script for now
     SIM_DATA_MEMORY_SIZE = 8192
     SIM_STACK_SIZE_WORDS = 256
-    SIM_PROG_MEM_CAPACITY_BYTES = 65536
+
+    # Let's adjust the program memory size to be more realistic and match the default in your script.
+    # If you need a larger memory (like 65536), you can change this constant.
+    SIM_PROG_MEM_CAPACITY_BYTES = SIM_PROGRAM_MEMORY_SIZE_BYTES
 
     if os.path.exists(source_file_to_process):
         print(f"Found source file: {source_file_to_process}")
@@ -249,6 +315,7 @@ if __name__ == "__main__":
                     output_binary_file=output_binary_file,
                     output_listing_file=output_listing_file,
                     output_disassembled_file=output_disassembled_file,
+                    output_sim_txt_file=output_sim_txt_file,
                     sim_data_memory_size=SIM_DATA_MEMORY_SIZE,
                     sim_stack_size=SIM_STACK_SIZE_WORDS,
                     sim_program_memory_capacity=SIM_PROG_MEM_CAPACITY_BYTES
@@ -260,6 +327,7 @@ if __name__ == "__main__":
                     output_binary_file=output_binary_file,
                     output_listing_file=output_listing_file,
                     output_disassembled_file=output_disassembled_file,
+                    output_sim_txt_file=output_sim_txt_file,
                     sim_data_memory_size=SIM_DATA_MEMORY_SIZE,
                     sim_stack_size=SIM_STACK_SIZE_WORDS,
                     sim_program_memory_capacity=SIM_PROG_MEM_CAPACITY_BYTES
@@ -272,6 +340,7 @@ if __name__ == "__main__":
                     output_binary_file=output_binary_file,
                     output_listing_file=output_listing_file,
                     output_disassembled_file=output_disassembled_file,
+                    output_sim_txt_file=output_sim_txt_file,
                     sim_data_memory_size=SIM_DATA_MEMORY_SIZE,
                     sim_stack_size=SIM_STACK_SIZE_WORDS,
                     sim_program_memory_capacity=SIM_PROG_MEM_CAPACITY_BYTES
