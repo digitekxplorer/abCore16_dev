@@ -69,6 +69,7 @@ class SALCodeGenerator:
         if CG_DEBUG_VERBOSE: print(
             f"// DEBUG_SCOPE: Entering scope: {scope_name} (type: {scope_type}) Depth: {len(self.symbol_tables)}")
         self.symbol_tables.append({})
+        # The 'var_count' here is for debug/metadata, not for allocation logic.
         self.scope_stack_info.append({'type': scope_type, 'name': scope_name, 'var_count_in_this_exact_scope': 0})
 
     def _exit_scope(self):
@@ -78,7 +79,7 @@ class SALCodeGenerator:
             self.symbol_tables.pop()
             self.scope_stack_info.pop()
 
-    def _add_symbol(self, name, symbol_type, location_or_offset, size=1):
+    def _add_symbol(self, name, symbol_type, location_or_offset, size=2):
         name_upper = name.upper()
         current_scope_sym_table = self.symbol_tables[-1]
         if name_upper in current_scope_sym_table:
@@ -87,15 +88,6 @@ class SALCodeGenerator:
 
         current_scope_sym_table[name_upper] = {'type': symbol_type, 'loc': location_or_offset, 'size': size,
                                                'scope_name': self.scope_stack_info[-1]['name']}
-
-        if symbol_type == 'local':
-            function_scope_found = False
-            for scope_info_entry in reversed(self.scope_stack_info):
-                if scope_info_entry['type'] == 'function':
-                    scope_info_entry['var_count'] = scope_info_entry.get('var_count', 0) + 1
-                    function_scope_found = True
-                    break
-            self.scope_stack_info[-1]['var_count_in_this_exact_scope'] += 1
 
     def _lookup_symbol(self, name):
         name_upper = name.upper()
@@ -127,12 +119,14 @@ class SALCodeGenerator:
                 raise Exception(
                     f"CodeGen Internal Error: fp_offset_next_local not set for function scope '{function_scope_info_for_local.get('name', 'UNKNOWN')}'.")
             location = function_scope_info_for_local['fp_offset_next_local']
-            function_scope_info_for_local['fp_offset_next_local'] -= 1
+            # Correct: each 16-bit variable is at a 2-byte offset from the previous one.
+            function_scope_info_for_local['fp_offset_next_local'] -= 2
             if CG_DEBUG_VERBOSE: self.emit(
                 f"// DEBUG_CG_ALLOC: Local Var '{var_name}' (Line: {var_name_node.line_no}) assigned FP offset: {location}")
         else:
             symbol_type = 'global'
             location = self.next_available_global_data_address
+            # Globals are 1 word (addresses increment by 1 word).
             self.next_available_global_data_address += 1
             if CG_DEBUG_VERBOSE: self.emit(
                 f"// DEBUG_CG_ALLOC: Global Var '{var_name}' (Line: {var_name_node.line_no}) assigned data memory 0x{location:04X}")
@@ -202,10 +196,9 @@ class SALCodeGenerator:
 
                     if CG_DEBUG_VERBOSE: print(f"// DEBUG_CG: Counting locals for function '{func_name_upper}'")
                     self._enter_scope('function', func_name_upper + "_countscope_pass")
-                    self.scope_stack_info[-1]['fp_offset_next_local'] = -1
-                    self.scope_stack_info[-1]['var_count'] = 0
 
                     num_locals = self._count_local_vars_recursive(stmt.body_node)
+
                     if CG_DEBUG_VERBOSE:
                         print(f"// DEBUG_CG: Function '{func_name_upper}' has {num_locals} local(s) from scan.")
                     self._exit_scope()
@@ -264,7 +257,7 @@ class SALCodeGenerator:
         count = 0
         if ast_node is None: return 0
         if isinstance(ast_node, VarDeclNode):
-            is_in_function_for_counting = any(s['type'] == 'function' for s in reversed(self.scope_stack_info))
+            is_in_function_for_counting = any(s['type'] == 'function' for s in self.scope_stack_info)
             if is_in_function_for_counting:
                 count += 1
         elif isinstance(ast_node, ArrayDeclNode):
@@ -280,7 +273,7 @@ class SALCodeGenerator:
             count += self._count_local_vars_recursive(ast_node.body_block)
         elif isinstance(ast_node, ForNode):
             if isinstance(ast_node.init_node, VarDeclNode):
-                if any(s['type'] == 'function' for s in reversed(self.scope_stack_info)):
+                if any(s['type'] == 'function' for s in self.scope_stack_info):
                     count += 1
             count += self._count_local_vars_recursive(ast_node.body_node)
         return count
@@ -400,25 +393,34 @@ class SALCodeGenerator:
         }
         self._enter_scope('function', scope_name=func_name_upper)
         current_function_scope_info = self.scope_stack_info[-1]
-        current_function_scope_info['fp_offset_next_local'] = -1
-        current_function_scope_info['var_count'] = 0
+
+        # Correct: Initial byte-offset for locals is -2
+        current_function_scope_info['fp_offset_next_local'] = -2
+
         for i, param_node in enumerate(node.params_nodes):
             param_name_upper = param_node.name.upper()
-            offset = 2 + i
+            offset = 2 + i  # Parameters are at positive offsets
             self.current_function_context['param_map'][param_name_upper] = offset
             self._add_symbol(param_node.name, 'param', offset)
+
         self.emit(f"\n// Function: {node.name_node.name}({', '.join(p.name for p in node.params_nodes)})")
         self.emit(f"{self.current_function_context['sal_label']}:")
         self.emit(f"PUSH {self.frame_pointer_reg}")
         self.emit(f"MOVFRSP {self.frame_pointer_reg}")
+
         num_locals_to_alloc = self.current_function_context['num_locals_from_scan']
+
         if CG_DEBUG_VERBOSE: self.emit(
             f"// DEBUG_CG: Function '{func_name_upper}' allocating space for {num_locals_to_alloc} locals based on scan.")
+
+        # Correct allocation: 1 PUSH per local variable.
         if num_locals_to_alloc > 0:
             for _ in range(num_locals_to_alloc):
-                self.emit(f"PUSH R0 // Allocate 1 word for local")
+                self.emit(f"PUSH R0 // Allocate 1 word (2 bytes) for a local")
+
         if node.body_node:
             node.body_node.accept(self)
+
         needs_implicit_jmp_to_epilogue = True
         if self.sal_code:
             last_sal_instr = self.sal_code[-1].strip().upper()
@@ -426,11 +428,14 @@ class SALCodeGenerator:
                     (last_sal_instr.startswith("JMP") and self.current_function_context and \
                      last_sal_instr.endswith(self.current_function_context['epilogue_label'])):
                 needs_implicit_jmp_to_epilogue = False
+
         if needs_implicit_jmp_to_epilogue and self.current_function_context:
             self.emit(f"JMP {self.current_function_context['epilogue_label']}")
+
         self.emit(f"{self.current_function_context['epilogue_label']}:")
         if num_locals_to_alloc > 0:
             self.emit(f"MOVTOSP {self.frame_pointer_reg}")
+
         self.emit(f"POP {self.frame_pointer_reg}")
         self.emit(f"RET")
         self._exit_scope()
