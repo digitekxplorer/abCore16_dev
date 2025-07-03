@@ -131,7 +131,6 @@ def p_statement_for_global_scope(p):
     p[0] = p[1]
 
 
-# --- MODIFICATION 1: Update variable declaration to handle arrays ---
 def p_variable_declaration_statement(p):
     '''variable_declaration_statement : VAR IDENTIFIER SEMI
                                       | VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
@@ -147,7 +146,6 @@ def p_variable_declaration_statement(p):
         p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
     elif len(p) == 4:  # Simple variable declaration: VAR IDENTIFIER SEMI
         p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
-# --- END MODIFICATION 1 ---
 
 
 def p_function_definition(p):
@@ -217,7 +215,6 @@ def p_empty_statement(p):
     p[0] = None
 
 
-# --- MODIFICATION 2: Update assignment to handle array access as a target ---
 def p_assignment_statement(p):
     '''assignment_statement : IDENTIFIER ASSIGN expression SEMI
                             | array_access ASSIGN expression SEMI'''
@@ -234,7 +231,6 @@ def p_assignment_statement(p):
             value_expr=p[3],
             line_no=p.lineno(2)
         )
-# --- END MODIFICATION 2 ---
 
 
 def p_print_statement(p):
@@ -396,7 +392,6 @@ def p_expression_unary(p):
         p[0] = UnaryOpNode(p[1], p[2], line_no=p.slice[1].lineno)
 
 
-# --- MODIFICATION 3: Update primary_expression to include array access ---
 def p_primary_expression(p):
     '''primary_expression : NUMBER
                           | IDENTIFIER
@@ -411,10 +406,8 @@ def p_primary_expression(p):
         p[0] = p[2]
     else: # This covers function_call_actual and the new array_access
         p[0] = p[1]
-# --- END MODIFICATION 3 ---
 
 
-# --- MODIFICATION 4: Add new grammar rule for array_access ---
 def p_array_access(p):
     '''array_access : IDENTIFIER LBRACKET expression RBRACKET'''
     p[0] = ArrayAccessNode(
@@ -422,7 +415,6 @@ def p_array_access(p):
         index_expr_node=p[3],
         line_no=p.lineno(1)
     )
-# --- END MODIFICATION 4 ---
 
 
 def p_function_call_actual(p):
