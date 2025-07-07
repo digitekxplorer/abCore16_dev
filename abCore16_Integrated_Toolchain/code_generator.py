@@ -8,9 +8,11 @@ from ast_nodes import (
     ForNode, VarDeclNode,
     ArrayDeclNode, ArrayAccessNode
 )
+# NEW: Import the centralized constant for the global data address
+from abcore16_defs import GLOBAL_DATA_START_ADDR
 
 # --- Global Debug Switch for Code Generator ---
-CG_DEBUG_VERBOSE = False  # Set to True to enable detailed CG prints, False to disable
+CG_DEBUG_VERBOSE = False
 
 
 class SALCodeGenerator:
@@ -19,19 +21,22 @@ class SALCodeGenerator:
         self.label_counter = 0
 
         self.symbol_tables = [{}]
-        self.scope_stack_info = [{'type': 'global', 'var_count': 0, 'base_offset': 0x1000, 'name': '_global'}]
+        # FIX: Use the imported constant
+        self.scope_stack_info = [
+            {'type': 'global', 'var_count': 0, 'base_offset': GLOBAL_DATA_START_ADDR, 'name': '_global'}]
 
-        self.next_available_global_data_address = 0x1000
+        # FIX: Use the imported constant
+        self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
 
         self._compiler_temp_pool_master = ["R7", "R6"]
         self._available_temp_regs = []
         self._currently_used_temps = set()
-
         self.current_function_context = None
         self.function_meta_map = {}
         self.return_value_reg = "R0"
         self.frame_pointer_reg = "R5"
 
+    # ... (helper methods like _new_temp are unchanged) ...
     def _initialize_temp_regs(self):
         self._available_temp_regs = list(self._compiler_temp_pool_master)
         self._available_temp_regs.reverse()
@@ -69,7 +74,6 @@ class SALCodeGenerator:
         if CG_DEBUG_VERBOSE: print(
             f"// DEBUG_SCOPE: Entering scope: {scope_name} (type: {scope_type}) Depth: {len(self.symbol_tables)}")
         self.symbol_tables.append({})
-        # The 'var_count' here is for debug/metadata, not for allocation logic.
         self.scope_stack_info.append({'type': scope_type, 'name': scope_name, 'var_count_in_this_exact_scope': 0})
 
     def _exit_scope(self):
@@ -85,7 +89,6 @@ class SALCodeGenerator:
         if name_upper in current_scope_sym_table:
             raise Exception(
                 f"CodeGen Error: Symbol '{name}' redefined in current scope ('{self.scope_stack_info[-1]['name']}').")
-
         current_scope_sym_table[name_upper] = {'type': symbol_type, 'loc': location_or_offset, 'size': size,
                                                'scope_name': self.scope_stack_info[-1]['name']}
 
@@ -101,72 +104,36 @@ class SALCodeGenerator:
         if var_name.upper() in self.symbol_tables[-1]:
             raise Exception(
                 f"CodeGen Error: Variable '{var_name}' (Line: {var_name_node.line_no}) already declared in this scope.")
-
-        symbol_type = 'global'
-        location = 0
-        is_in_function_scope = False
-        function_scope_info_for_local = None
-
-        for scope_info_entry in reversed(self.scope_stack_info):
-            if scope_info_entry['type'] == 'function':
-                is_in_function_scope = True
-                function_scope_info_for_local = scope_info_entry
-                break
-
+        is_in_function_scope = any(s['type'] == 'function' for s in self.scope_stack_info)
         if is_in_function_scope:
             symbol_type = 'local'
+            function_scope_info_for_local = next(s for s in reversed(self.scope_stack_info) if s['type'] == 'function')
             if 'fp_offset_next_local' not in function_scope_info_for_local:
-                raise Exception(
-                    f"CodeGen Internal Error: fp_offset_next_local not set for function scope '{function_scope_info_for_local.get('name', 'UNKNOWN')}'.")
+                raise Exception("CodeGen Internal Error: fp_offset_next_local not set.")
             location = function_scope_info_for_local['fp_offset_next_local']
-            # Correct: each 16-bit variable is at a 2-byte offset from the previous one.
             function_scope_info_for_local['fp_offset_next_local'] -= 2
-            if CG_DEBUG_VERBOSE: self.emit(
-                f"// DEBUG_CG_ALLOC: Local Var '{var_name}' (Line: {var_name_node.line_no}) assigned FP offset: {location}")
+            self._add_symbol(var_name, symbol_type, location)
         else:
             symbol_type = 'global'
             location = self.next_available_global_data_address
-            # Globals are 1 word (addresses increment by 1 word).
-            self.next_available_global_data_address += 1
-            if CG_DEBUG_VERBOSE: self.emit(
-                f"// DEBUG_CG_ALLOC: Global Var '{var_name}' (Line: {var_name_node.line_no}) assigned data memory 0x{location:04X}")
-
-        self._add_symbol(var_name, symbol_type, location)
+            self.next_available_global_data_address += 2  # Byte-addressable: each word is 2 bytes
+            self._add_symbol(var_name, symbol_type, location)
         return self._lookup_symbol(var_name)
 
     def _generate_address_of_array_element(self, node: ArrayAccessNode):
-        """
-        Generates SAL to calculate the address of an array element.
-        Formula: address = base_address + index
-        Returns the temporary register holding the final address.
-        """
         array_name = node.name_node.name
         self.emit(f"// Calculating address for {array_name}[...]")
-
         symbol_info = self._lookup_symbol(array_name)
-        if not symbol_info:
-            raise Exception(f"CodeGen Error: Use of undeclared array '{array_name}' (Line: {node.line_no}).")
-        if symbol_info['type'] != 'array':
-            raise Exception(f"CodeGen Error: Symbol '{array_name}' is not an array (Line: {node.line_no}).")
-
+        if not symbol_info or symbol_info['type'] != 'array':
+            raise Exception(f"CodeGen Error: '{array_name}' is not a declared array.")
         base_address = symbol_info['loc']
-
-        # 1. Get the index value into a register
         index_reg = node.index_expr_node.accept(self)
-        if index_reg is None or not isinstance(index_reg, str):
-            raise Exception(f"CodeGen Error: Array index expression for '{array_name}' is invalid.")
-
-        # 2. Get the base address into a register
         addr_reg = self._new_temp()
         self.emit(f"LOAD {addr_reg}, #{base_address}")
-
-        # 3. Add them together: final_address = base_address + index
+        # Scale the index by 2 for byte-addressable memory
+        self.emit(f"SHL {index_reg}, #1")
         self.emit(f"ADD {addr_reg}, {index_reg}")
-
-        # 4. Clean up the index register if it was a temporary one
         self._free_temp(index_reg)
-
-        # The final address is now in addr_reg
         return addr_reg
 
     def generate(self, ast_root_node):
@@ -174,65 +141,47 @@ class SALCodeGenerator:
         self._initialize_temp_regs()
         self.symbol_tables = [{'type': 'global', 'name': '_global'}]
         self.scope_stack_info = [{'type': 'global', 'var_count': 0, 'name': '_global'}]
-        self.next_available_global_data_address = 0x1000
+        # FIX: Use the imported constant
+        self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
         self.current_function_context = None
         self.function_meta_map = {}
 
         if not isinstance(ast_root_node, ProgramNode): return ""
-
-        if CG_DEBUG_VERBOSE: print(
-            "// DEBUG_CG: Starting generate() - 1st Pass for function metadata and local counts.")
+        # ... (rest of generate method is unchanged) ...
+        if CG_DEBUG_VERBOSE: print("// DEBUG_CG: Starting generate() - 1st Pass...")
         if hasattr(ast_root_node, 'statements'):
             for stmt in ast_root_node.statements:
                 if isinstance(stmt, FunctionDefinitionNode):
                     func_name_upper = stmt.name_node.name.upper()
                     if func_name_upper in self.function_meta_map:
-                        raise Exception(
-                            f"CodeGen Error: Function '{func_name_upper}' redefined (Line: {stmt.line_no}).")
-
+                        raise Exception(f"CodeGen Error: Function '{func_name_upper}' redefined.")
                     sal_label = self.new_label(f"FUNC_{func_name_upper}")
                     epilogue_label = self.new_label(f"EPILOGUE_{func_name_upper}")
                     param_names = [p.name.upper() for p in stmt.params_nodes]
-
-                    if CG_DEBUG_VERBOSE: print(f"// DEBUG_CG: Counting locals for function '{func_name_upper}'")
                     self._enter_scope('function', func_name_upper + "_countscope_pass")
-
                     num_locals = self._count_local_vars_recursive(stmt.body_node)
-
-                    if CG_DEBUG_VERBOSE:
-                        print(f"// DEBUG_CG: Function '{func_name_upper}' has {num_locals} local(s) from scan.")
                     self._exit_scope()
-
-                    self.function_meta_map[func_name_upper] = {
-                        'sal_label': sal_label,
-                        'param_names': param_names,
-                        'epilogue_label': epilogue_label,
-                        'num_locals_from_scan': num_locals
-                    }
-
+                    self.function_meta_map[func_name_upper] = {'sal_label': sal_label, 'param_names': param_names,
+                                                               'epilogue_label': epilogue_label,
+                                                               'num_locals_from_scan': num_locals}
         global_code_sal = []
         temp_sal_holder = self.sal_code
         self.sal_code = global_code_sal
         has_any_global_executable_code = False
-
         if hasattr(ast_root_node, 'statements'):
             for stmt in ast_root_node.statements:
                 if not isinstance(stmt, FunctionDefinitionNode):
                     if stmt:
                         stmt.accept(self)
-                        is_executable = not isinstance(stmt, (VarDeclNode, ArrayDeclNode)) or \
-                                        (isinstance(stmt, VarDeclNode) and stmt.init_expr_node)
-                        if is_executable:
-                            has_any_global_executable_code = True
-
+                        is_executable = not isinstance(stmt, (VarDeclNode, ArrayDeclNode)) or (
+                                    isinstance(stmt, VarDeclNode) and stmt.init_expr_node)
+                        if is_executable: has_any_global_executable_code = True
         self.sal_code = temp_sal_holder
         self.sal_code.extend(global_code_sal)
-
         main_called_or_global_code_ran = has_any_global_executable_code
         if "MAIN" in self.function_meta_map:
             self.emit(f"CALL {self.function_meta_map['MAIN']['sal_label']}")
             main_called_or_global_code_ran = True
-
         if main_called_or_global_code_ran:
             if not self.sal_code or self.sal_code[-1].strip().upper() != "HALT":
                 self.emit("HALT // Auto-HALT after main logic/global code")
@@ -240,59 +189,55 @@ class SALCodeGenerator:
             self.emit("HALT // No main() or global executable code to run.")
         elif not self.sal_code:
             self.emit("HALT // Empty program.")
-
         if bool(self.function_meta_map):
             self.emit("\n// --- Function Definitions ---")
             if hasattr(ast_root_node, 'statements'):
                 for stmt in ast_root_node.statements:
                     if isinstance(stmt, FunctionDefinitionNode):
                         if stmt: stmt.accept(self)
-
         if self._currently_used_temps and CG_DEBUG_VERBOSE:
             print(
                 f"// WARNING CG: End of gen, {len(self._currently_used_temps)} temp regs used: {self._currently_used_temps}")
         return "\n".join(self.sal_code)
 
     def _count_local_vars_recursive(self, ast_node):
+        # ... (this function is unchanged) ...
         count = 0
         if ast_node is None: return 0
         if isinstance(ast_node, VarDeclNode):
-            is_in_function_for_counting = any(s['type'] == 'function' for s in self.scope_stack_info)
-            if is_in_function_for_counting:
-                count += 1
+            if any(s['type'] == 'function' for s in self.scope_stack_info): count += 1
         elif isinstance(ast_node, ArrayDeclNode):
-            pass  # Local arrays not supported, don't count
+            pass
         elif isinstance(ast_node, ProgramNode) and hasattr(ast_node, 'statements'):
-            for stmt_in_block in ast_node.statements:
-                count += self._count_local_vars_recursive(stmt_in_block)
+            for stmt_in_block in ast_node.statements: count += self._count_local_vars_recursive(stmt_in_block)
         elif isinstance(ast_node, IfNode):
             count += self._count_local_vars_recursive(ast_node.true_block)
-            if ast_node.false_block:
-                count += self._count_local_vars_recursive(ast_node.false_block)
+            if ast_node.false_block: count += self._count_local_vars_recursive(ast_node.false_block)
         elif isinstance(ast_node, WhileNode):
             count += self._count_local_vars_recursive(ast_node.body_block)
         elif isinstance(ast_node, ForNode):
             if isinstance(ast_node.init_node, VarDeclNode):
-                if any(s['type'] == 'function' for s in self.scope_stack_info):
-                    count += 1
+                if any(s['type'] == 'function' for s in self.scope_stack_info): count += 1
             count += self._count_local_vars_recursive(ast_node.body_node)
         return count
 
     def visit_ArrayDeclNode(self, node):
-        if CG_DEBUG_VERBOSE: self.emit(f"// ArrayDecl: {node.var_name_node.name}[{node.size}] (Line: {node.line_no})")
-        if len(self.symbol_tables) > 1 or self.scope_stack_info[0]['type'] != 'global':
-            raise Exception(
-                f"CodeGen Error: Array '{node.var_name_node.name}' declared outside global scope. Local arrays not yet supported. (Line: {node.line_no})")
+        if CG_DEBUG_VERBOSE: self.emit(f"// ArrayDecl: {node.var_name_node.name}[{node.size}]")
+        if any(s['type'] != 'global' for s in self.scope_stack_info):
+            raise Exception("CodeGen Error: Local arrays not yet supported.")
         array_name = node.var_name_node.name
-        array_size = node.size
         if array_name.upper() in self.symbol_tables[-1]:
-            raise Exception(
-                f"CodeGen Error: Symbol '{array_name}' already declared in this scope (Line: {node.line_no}).")
+            raise Exception(f"CodeGen Error: Symbol '{array_name}' already declared.")
         base_address = self.next_available_global_data_address
-        self.emit(f"// Allocating {array_size} words for array '{array_name}' at 0x{base_address:04X}")
-        self._add_symbol(array_name, 'array', base_address, size=array_size)
-        self.next_available_global_data_address += array_size
+        array_size_in_elements = node.size
+        # Byte-addressable: allocation is in bytes
+        array_size_in_bytes = array_size_in_elements * 2
+        self.emit(
+            f"// Allocating {array_size_in_elements} words ({array_size_in_bytes} bytes) for array '{array_name}' at 0x{base_address:04X}")
+        self._add_symbol(array_name, 'array', base_address, size=array_size_in_elements)
+        self.next_available_global_data_address += array_size_in_bytes
 
+    # ... (the rest of the file is unchanged) ...
     def visit_VarDeclNode(self, node):
         if CG_DEBUG_VERBOSE: self.emit(f"// VarDecl: {node.var_name_node.name} (Line: {node.line_no})")
         symbol_info = self._allocate_storage_for_decl(node.var_name_node)
@@ -394,12 +339,11 @@ class SALCodeGenerator:
         self._enter_scope('function', scope_name=func_name_upper)
         current_function_scope_info = self.scope_stack_info[-1]
 
-        # Correct: Initial byte-offset for locals is -2
         current_function_scope_info['fp_offset_next_local'] = -2
 
         for i, param_node in enumerate(node.params_nodes):
             param_name_upper = param_node.name.upper()
-            offset = 2 + i  # Parameters are at positive offsets
+            offset = 2 + i
             self.current_function_context['param_map'][param_name_upper] = offset
             self._add_symbol(param_node.name, 'param', offset)
 
@@ -413,7 +357,6 @@ class SALCodeGenerator:
         if CG_DEBUG_VERBOSE: self.emit(
             f"// DEBUG_CG: Function '{func_name_upper}' allocating space for {num_locals_to_alloc} locals based on scan.")
 
-        # Correct allocation: 1 PUSH per local variable.
         if num_locals_to_alloc > 0:
             for _ in range(num_locals_to_alloc):
                 self.emit(f"PUSH R0 // Allocate 1 word (2 bytes) for a local")
@@ -588,11 +531,9 @@ class SALCodeGenerator:
         reg_left = node.left.accept(self)
         reg_right = node.right.accept(self)
         if reg_left is None or not isinstance(reg_left, str):
-            raise Exception(
-                f"CodeGen Error: Left operand for binary op '{node.op}' is invalid: {reg_left} (Node: {node.left!r})")
+            raise Exception(f"CodeGen Error: Left operand for binary op '{node.op}' is invalid.")
         if reg_right is None or not isinstance(reg_right, str):
-            raise Exception(
-                f"CodeGen Error: Right operand for binary op '{node.op}' is invalid: {reg_right} (Node: {node.right!r})")
+            raise Exception(f"CodeGen Error: Right operand for binary op '{node.op}' is invalid.")
         op = node.op
         result_reg = reg_left
         if reg_left not in self._compiler_temp_pool_master:
@@ -648,26 +589,21 @@ class SALCodeGenerator:
                 self.emit(f"{lbl_sf1}:");
                 self.emit(f"JNO {true_lbl_bool}");
             self.emit(f"JMP {false_lbl_bool}");
-            self.emit(f"{true_lbl_bool}:")
-            self.emit(f"LOAD {result_reg}, #1")
+            self.emit(f"{true_lbl_bool}:");
+            self.emit(f"LOAD {result_reg}, #1");
             self.emit(f"JMP {end_lbl_bool}")
-            self.emit(f"{false_lbl_bool}:")
-            self.emit(f"LOAD {result_reg}, #0")
+            self.emit(f"{false_lbl_bool}:");
+            self.emit(f"LOAD {result_reg}, #0");
             self.emit(f"{end_lbl_bool}:")
         else:
             self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled binary op '{op}'")
-        if reg_right in self._compiler_temp_pool_master:
-            self._free_temp(reg_right)
-        if result_reg is None or not isinstance(result_reg, str):
-            raise Exception(
-                f"CodeGen Error: visit_BinaryOpNode op '{op}' terminally resulted in invalid register: {result_reg}")
+        if reg_right in self._compiler_temp_pool_master: self._free_temp(reg_right)
         return result_reg
 
     def visit_UnaryOpNode(self, node):
         operand_reg = node.operand.accept(self)
         if operand_reg is None or not isinstance(operand_reg, str):
-            raise Exception(
-                f"CodeGen Error: Operand for unary op '{node.op}' did not evaluate to a valid register name. Got: {operand_reg}")
+            raise Exception(f"CodeGen Error: Operand for unary op '{node.op}' is invalid.")
         op = node.op
         result_reg = operand_reg
         new_temp_for_result = False
@@ -687,9 +623,6 @@ class SALCodeGenerator:
             self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled unary op '{op}'")
         if new_temp_for_result and operand_reg in self._compiler_temp_pool_master:
             self._free_temp(operand_reg)
-        if result_reg is None or not isinstance(result_reg, str):
-            raise Exception(
-                f"CodeGen Error: visit_UnaryOpNode op '{op}' terminally resulted in invalid register: {result_reg}")
         return result_reg
 
     def visit_ExpressionStatementNode(self, node):
@@ -707,8 +640,7 @@ class SALCodeGenerator:
         if node.expr_node:
             expr_val_reg = node.expr_node.accept(self)
             if expr_val_reg is None or not isinstance(expr_val_reg, str):
-                raise Exception(
-                    f"CodeGen Error: Return expression evaluated to invalid register: {expr_val_reg} (Line: {node.line_no}). Type: {type(expr_val_reg)}")
+                raise Exception(f"CodeGen Error: Return expression evaluated to invalid register.")
             if expr_val_reg != self.return_value_reg:
                 self.emit(f"MOV {self.return_value_reg}, {expr_val_reg}")
             if expr_val_reg in self._compiler_temp_pool_master and expr_val_reg != self.return_value_reg:
@@ -719,19 +651,19 @@ class SALCodeGenerator:
         func_name_upper = node.name_node.name.upper()
         func_meta = self.function_meta_map.get(func_name_upper)
         if not func_meta:
-            raise Exception(f"CodeGen Error: Call to undefined function '{node.name_node.name}' (Line: {node.line_no})")
+            raise Exception(f"CodeGen Error: Call to undefined function '{node.name_node.name}'")
         num_expected_params = len(func_meta['param_names'])
         num_provided_args = len(node.args_nodes)
         if num_expected_params != num_provided_args:
             raise Exception(
-                f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args} (Line: {node.line_no}).")
+                f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args}.")
         self.emit(f"// Calling function: {node.name_node.name} ({num_provided_args} args)")
         temp_arg_regs_used = []
         for arg_expr_node in reversed(node.args_nodes):
             arg_val_reg = arg_expr_node.accept(self)
             if arg_val_reg is None or not isinstance(arg_val_reg, str):
                 raise Exception(
-                    f"CodeGen Error: Argument for call to '{func_name_upper}' evaluated to invalid register: {arg_val_reg}.")
+                    f"CodeGen Error: Argument for call to '{func_name_upper}' evaluated to invalid register.")
             self.emit(f"PUSH {arg_val_reg}")
             if arg_val_reg in self._compiler_temp_pool_master:
                 temp_arg_regs_used.append(arg_val_reg)
@@ -749,3 +681,4 @@ class SALCodeGenerator:
     def generic_visit(self, node):
         if node is None: return
         self.emit(f"// WARNING: Generic visit for AST node type {type(node).__name__} (value: {node!r})")
+        
