@@ -62,11 +62,14 @@ def t_IDENTIFIER(t):
     t.type = reserved.get(t.value.lower(), 'IDENTIFIER')
     return t
 
-
+# --- FIX: Updated t_NUMBER to handle hexadecimal literals ---
 def t_NUMBER(t):
-    r'\d+'
+    r'0x[0-9a-fA-F]+|\d+'  # Regex now matches '0x...' OR decimal digits
     try:
-        t.value = int(t.value)
+        if t.value.startswith(('0x', '0X')):
+            t.value = int(t.value, 16)  # Parse as base 16
+        else:
+            t.value = int(t.value, 10)  # Parse as base 10
     except ValueError:
         print(f"PLY Lexer: Int value too large '{t.value}' line {t.lexer.lineno}");
         t.value = 0
@@ -91,6 +94,7 @@ def t_error(t):
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
+# The rest of the file is unchanged, as the parser logic is correct.
 precedence = (
     ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'),
     ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
