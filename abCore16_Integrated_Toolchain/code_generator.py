@@ -174,7 +174,7 @@ class SALCodeGenerator:
                     if stmt:
                         stmt.accept(self)
                         is_executable = not isinstance(stmt, (VarDeclNode, ArrayDeclNode)) or (
-                                    isinstance(stmt, VarDeclNode) and stmt.init_expr_node)
+                                isinstance(stmt, VarDeclNode) and stmt.init_expr_node)
                         if is_executable: has_any_global_executable_code = True
         self.sal_code = temp_sal_holder
         self.sal_code.extend(global_code_sal)
@@ -649,14 +649,69 @@ class SALCodeGenerator:
 
     def visit_FunctionCallNode(self, node):
         func_name_upper = node.name_node.name.upper()
+
+        # --- NEW: Handle mmio_write built-in ---
+        if func_name_upper == "MMIO_WRITE":
+            if len(node.args_nodes) != 2:
+                raise Exception(
+                    f"CodeGen Error: mmio_write() requires exactly 2 arguments (address, value), but got {len(node.args_nodes)} on line {node.line_no}.")
+
+            self.emit(f"// --- Built-in mmio_write Call (Line: {node.line_no}) ---")
+
+            # Arg 1: Address Expression -> R_addr
+            address_expr_node = node.args_nodes[0]
+            addr_reg = address_expr_node.accept(self)
+
+            # Arg 2: Value Expression -> R_val
+            value_expr_node = node.args_nodes[1]
+            value_reg = value_expr_node.accept(self)
+
+            # Emit the store instruction
+            self.emit(f"STORI {value_reg}, {addr_reg} // Mem[{addr_reg}] = {value_reg}")
+
+            # Free temporary registers used
+            self._free_temp(addr_reg)
+            self._free_temp(value_reg)
+
+            # mmio_write does not return a value, so we return None.
+            return None
+
+        # --- NEW: Handle mmio_read built-in ---
+        if func_name_upper == "MMIO_READ":
+            if len(node.args_nodes) != 1:
+                raise Exception(
+                    f"CodeGen Error: mmio_read() requires exactly 1 argument (address), but got {len(node.args_nodes)} on line {node.line_no}.")
+
+            self.emit(f"// --- Built-in mmio_read Call (Line: {node.line_no}) ---")
+
+            # Arg 1: Address Expression -> R_addr
+            address_expr_node = node.args_nodes[0]
+            addr_reg = address_expr_node.accept(self)
+
+            # The result register will be a new temporary register
+            result_reg = self._new_temp()
+
+            # Emit the load instruction
+            self.emit(f"LOADI {result_reg}, {addr_reg} // {result_reg} = Mem[{addr_reg}]")
+
+            # Free the register that held the address
+            self._free_temp(addr_reg)
+
+            # Return the register holding the result of the read
+            return result_reg
+
+        # --- Existing logic for user-defined functions ---
         func_meta = self.function_meta_map.get(func_name_upper)
         if not func_meta:
-            raise Exception(f"CodeGen Error: Call to undefined function '{node.name_node.name}'")
+            raise Exception(
+                f"CodeGen Error: Call to undefined function '{node.name_node.name}' on line {node.line_no}.")
+
         num_expected_params = len(func_meta['param_names'])
         num_provided_args = len(node.args_nodes)
         if num_expected_params != num_provided_args:
             raise Exception(
-                f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args}.")
+                f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args} on line {node.line_no}.")
+
         self.emit(f"// Calling function: {node.name_node.name} ({num_provided_args} args)")
         temp_arg_regs_used = []
         for arg_expr_node in reversed(node.args_nodes):
@@ -681,4 +736,3 @@ class SALCodeGenerator:
     def generic_visit(self, node):
         if node is None: return
         self.emit(f"// WARNING: Generic visit for AST node type {type(node).__name__} (value: {node!r})")
-        
