@@ -24,7 +24,6 @@ class SALCodeGenerator:
             {'type': 'global', 'var_count': 0, 'base_offset': GLOBAL_DATA_START_ADDR, 'name': '_global'}]
 
         self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
-
         self._compiler_temp_pool_master = ["R7", "R6", "R4", "R3"]
         self._available_temp_regs = []
         self._currently_used_temps = set()
@@ -33,6 +32,7 @@ class SALCodeGenerator:
         self.return_value_reg = "R0"
         self.frame_pointer_reg = "R5"
         self.scratch_reg_1 = "R2"
+        self.break_label_stack = []
 
     # ... (all methods from _initialize_temp_regs to _exit_scope are unchanged) ...
     def _initialize_temp_regs(self):
@@ -504,6 +504,68 @@ class SALCodeGenerator:
             self.emit(f"JMP {loop_body_label} // FOR: No condition, infinite loop")
         self.emit(f"{loop_end_label}:")
 
+    def visit_BreakNode(self, node):
+        if not self.break_label_stack:
+            raise Exception("CodeGen Error: 'break' statement found outside of a switch or loop.")
+
+        # Get the label for the end of the current switch/loop
+        end_label = self.break_label_stack[-1]
+        self.emit(f"JMP {end_label}")
+
+    def visit_SwitchNode(self, node):
+        self.emit(f"// --- SWITCH statement (Line: {node.line_no}) ---")
+
+        # Create unique labels for the switch structure
+        end_switch_label = self.new_label("SWITCH_END")
+        default_case_label = None  # We'll find this as we iterate
+        case_labels = []
+
+        # Push the end label onto the stack for 'break' statements to use
+        self.break_label_stack.append(end_switch_label)
+
+        # Step 1: Evaluate the switch expression and store its value
+        self.emit(f"// Evaluate switch expression")
+        expr_reg = node.condition.accept(self)
+
+        # Step 2: Generate the dispatch chain of comparisons and jumps
+        self.emit(f"// Dispatch chain")
+        for i, case_node in enumerate(node.cases):
+            case_body_label = self.new_label("CASE_BODY")
+            case_labels.append(case_body_label)
+
+            if case_node.value_expr is not None:  # This is a 'case X:'
+                self.emit(f"// Comparing with case: {case_node.value_expr.value}")
+                const_reg = case_node.value_expr.accept(self)
+                self.emit(f"CMP {expr_reg}, {const_reg}")
+                self.emit(f"JE {case_body_label}")
+                self._free_temp(const_reg)
+            else:  # This is the 'default:' case
+                if default_case_label:
+                    raise Exception("CodeGen Error: Multiple 'default' cases in one switch statement.")
+                default_case_label = case_body_label
+
+        self._free_temp(expr_reg)  # We're done with the expression value now
+
+        # If a default case exists, jump to it. Otherwise, jump to the end.
+        if default_case_label:
+            self.emit(f"JMP {default_case_label} // No case matched, go to default")
+        else:
+            self.emit(f"JMP {end_switch_label} // No case matched and no default, exit switch")
+
+        # Step 3: Generate the code for the body of each case
+        self.emit(f"\n// Switch case bodies")
+        for i, case_node in enumerate(node.cases):
+            self.emit(f"{case_labels[i]}:")
+            # The CaseNode doesn't need its own visit method; we can just process it here.
+            # This is simpler because a CaseNode is just a container for statements.
+            if case_node.statements:
+                for stmt in case_node.statements:
+                    stmt.accept(self)
+
+        # Step 4: Add the end label and clean up the break stack
+        self.emit(f"{end_switch_label}: // End of switch statement")
+        self.break_label_stack.pop()
+
     def visit_PrintNode(self, node):
         expr_result_reg = node.expression.accept(self);
         if expr_result_reg is None or not isinstance(expr_result_reg, str):
@@ -824,6 +886,66 @@ class SALCodeGenerator:
             self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled unary op '{op}'")
 
         if result_reg != operand_reg: self._free_temp(operand_reg)
+        return result_reg
+
+    def visit_PostfixOpNode(self, node):
+        op = node.op
+        operand_node = node.operand
+
+        # The operand for ++/-- must be something we can assign back to (an "l-value").
+        # For now, we'll just support simple identifiers.
+        if not isinstance(operand_node, IdentifierNode):
+            raise Exception(f"CodeGen Error: Target for '{op}' must be a variable on line {node.line_no}.")
+
+        var_name = operand_node.name
+        symbol_info = self._lookup_symbol(var_name)
+        if not symbol_info:
+            raise Exception(f"CodeGen Error: Cannot {op} undeclared variable '{var_name}' on line {node.line_no}.")
+
+        self.emit(f"// --- Postfix '{op}' on variable '{var_name}' ---")
+
+        # Step 1: Load the current value of the variable. This will be the result of the expression.
+        self.emit(f"// Load current value of '{var_name}' to be the expression result.")
+        result_reg = operand_node.accept(self)
+
+        # Step 2: Create a second copy of the value that we can modify.
+        # This prevents us from modifying the result register.
+        val_to_modify_reg = self._new_temp()
+        self.emit(f"MOV {val_to_modify_reg}, {result_reg}")
+
+        # Step 3: Increment or decrement the copy.
+        is_pointer = (symbol_info.get('data_type') == 'pointer')
+
+        if is_pointer:
+            # Pointer arithmetic: add/sub 2
+            self.emit(f"// Pointer arithmetic scaling (size=2)")
+            scale_reg = self._new_temp()
+            self.emit(f"LOAD {scale_reg}, #2")
+            if op == '++':
+                self.emit(f"ADD {val_to_modify_reg}, {scale_reg}")
+            else:  # '--'
+                self.emit(f"SUB {val_to_modify_reg}, {scale_reg}")
+            self._free_temp(scale_reg)
+        else:
+            # Integer arithmetic: add/sub 1
+            if op == '++':
+                self.emit(f"INC {val_to_modify_reg}")
+            else:  # '--'
+                self.emit(f"DEC {val_to_modify_reg}")
+
+        # Step 4: Store the new, modified value back into the variable's memory location.
+        self.emit(f"// Store updated value back into '{var_name}'")
+        if symbol_info['type'] == 'global':
+            self.emit(f"STORE {val_to_modify_reg}, 0x{symbol_info['loc']:04X}")
+        elif symbol_info['type'] in ['local', 'param']:
+            self.emit(f"STORFR {val_to_modify_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+        else:
+            raise Exception(f"CodeGen Error: Cannot assign back to symbol of type '{symbol_info['type']}'.")
+
+        # Free the register that held the modified value.
+        self._free_temp(val_to_modify_reg)
+
+        # Step 5: Return the register holding the *original* value.
         return result_reg
 
     def visit_ExpressionStatementNode(self, node):
