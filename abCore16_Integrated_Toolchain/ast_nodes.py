@@ -218,3 +218,67 @@ class FunctionCallNode(ExpressionNode):
     def __repr__(self):
         args_repr_str = ", ".join([repr(arg) for arg in self.args_nodes]) if self.args_nodes else ""
         return f"FunctionCallNode(name='{self.name_node.name}', args=[{args_repr_str}])"
+
+class PostfixOpNode(ExpressionNode):
+    """Node for postfix operations like p++ or p--."""
+    def __init__(self, op, operand, line_no=None):
+        self.op = op          # The operator string, e.g., '++' or '--'
+        self.operand = operand # The node being operated on (e.g., IdentifierNode for 'p')
+        self.line_no = line_no
+
+    def __repr__(self):
+        return f"PostfixOpNode({self.op!r}, {self.operand!r})"
+
+    def accept(self, visitor):
+        # We assume a visitor will have a method like visit_PostfixOpNode
+        if hasattr(visitor, 'visit_PostfixOpNode'):
+            return visitor.visit_PostfixOpNode(self)
+        else:
+            return visitor.generic_visit(self)
+
+class BreakNode(StatementNode):
+    """Node for the 'break' statement."""
+    def __repr__(self):
+        return "BreakNode"
+
+    def accept(self, visitor):
+        if hasattr(visitor, 'visit_BreakNode'):
+            return visitor.visit_BreakNode(self)
+        else:
+            return visitor.generic_visit(self)
+
+
+class CaseNode(StatementNode):
+    """Node for a single 'case' or 'default' block within a switch."""
+    def __init__(self, value_expr, statements, line_no=None):
+        # value_expr is a NumberNode for 'case', or None for 'default'
+        self.value_expr = value_expr
+        self.statements = statements if statements is not None else []
+        self.line_no = line_no
+
+    def __repr__(self):
+        val_repr = "DEFAULT" if self.value_expr is None else repr(self.value_expr)
+        return f"CaseNode({val_repr}, {self.statements!r})"
+
+    def accept(self, visitor):
+        if hasattr(visitor, 'visit_CaseNode'):
+            return visitor.visit_CaseNode(self)
+        else:
+            return visitor.generic_visit(self)
+
+
+class SwitchNode(StatementNode):
+    """Node for a 'switch' statement."""
+    def __init__(self, condition, cases, line_no=None):
+        self.condition = condition # The expression in switch ( ... )
+        self.cases = cases         # A list of CaseNode objects
+        self.line_no = line_no
+
+    def __repr__(self):
+        return f"SwitchNode({self.condition!r}, {self.cases!r})"
+
+    def accept(self, visitor):
+        if hasattr(visitor, 'visit_SwitchNode'):
+            return visitor.visit_SwitchNode(self)
+        else:
+            return visitor.generic_visit(self)
