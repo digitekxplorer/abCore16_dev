@@ -12,15 +12,15 @@ from ast_nodes import (
     FunctionDefinitionNode, ReturnNode,
     ExpressionStatementNode, FunctionCallNode,
     ForNode, VarDeclNode,
-    ArrayDeclNode, ArrayAccessNode # <-- Imports are already correct
+    ArrayDeclNode, ArrayAccessNode
 )
 
 # --- Tokenizer (Lexer) Definition ---
-# This section is already correct from the previous step and has no new changes.
+# FIX: Added AMPERSAND and STAR for pointer operations
 tokens = (
     'NUMBER', 'IDENTIFIER',
-    'PLUS', 'MINUS', 'TIMES',
-    'ASSIGN', 'SEMI',
+    'PLUS', 'MINUS', 'STAR',  # 'TIMES' is replaced by 'STAR'
+    'AMPERSAND', 'ASSIGN', 'SEMI',
     'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA',
     'EQ', 'NEQ', 'LE', 'GE', 'LT', 'GT',
     'AND_LOGICAL', 'OR_LOGICAL', 'NOT_LOGICAL',
@@ -41,7 +41,7 @@ t_ASSIGN = r'='
 t_NOT_LOGICAL = r'!'
 t_PLUS = r'\+'
 t_MINUS = r'-'
-t_TIMES = r'\*'
+# t_TIMES is removed. STAR will handle multiplication and dereference.
 t_SEMI = r';'
 t_LPAREN = r'\('
 t_RPAREN = r'\)'
@@ -50,6 +50,10 @@ t_RBRACE = r'\}'
 t_LBRACKET = r'\['
 t_RBRACKET = r'\]'
 t_COMMA = r','
+
+# FIX: Add lexer rules for new pointer tokens
+t_AMPERSAND = r'&'
+t_STAR = r'\*' # This now serves for both multiplication and dereferencing
 
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
@@ -62,14 +66,13 @@ def t_IDENTIFIER(t):
     t.type = reserved.get(t.value.lower(), 'IDENTIFIER')
     return t
 
-# --- FIX: Updated t_NUMBER to handle hexadecimal literals ---
 def t_NUMBER(t):
-    r'0x[0-9a-fA-F]+|\d+'  # Regex now matches '0x...' OR decimal digits
+    r'0x[0-9a-fA-F]+|\d+'
     try:
         if t.value.startswith(('0x', '0X')):
-            t.value = int(t.value, 16)  # Parse as base 16
+            t.value = int(t.value, 16)
         else:
-            t.value = int(t.value, 10)  # Parse as base 10
+            t.value = int(t.value, 10)
     except ValueError:
         print(f"PLY Lexer: Int value too large '{t.value}' line {t.lexer.lineno}");
         t.value = 0
@@ -94,12 +97,13 @@ def t_error(t):
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
-# The rest of the file is unchanged, as the parser logic is correct.
+# FIX: Update precedence for unary pointer operators
 precedence = (
     ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'),
     ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
-    ('left', 'PLUS', 'MINUS'), ('left', 'TIMES'),
-    ('right', 'NOT_LOGICAL', 'UMINUS')
+    ('left', 'PLUS', 'MINUS'),
+    ('left', 'STAR'), # Renamed from TIMES
+    ('right', 'NOT_LOGICAL', 'UMINUS', 'UNARY_PTR') # New group for pointer ops
 )
 start = 'program'
 
@@ -139,16 +143,14 @@ def p_variable_declaration_statement(p):
     '''variable_declaration_statement : VAR IDENTIFIER SEMI
                                       | VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
                                       | VAR IDENTIFIER ASSIGN expression SEMI'''
-    if len(p) == 7:  # Array declaration: VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
+    if len(p) == 7:
         size = p[4]
         if not isinstance(size, int) or size <= 0:
-            # Note: A robust implementation would use p.error() to halt parsing.
-            # For now, we print a fatal error message.
             print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
         p[0] = ArrayDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
-    elif len(p) == 6:  # Variable with initializer: VAR IDENTIFIER ASSIGN expression SEMI
+    elif len(p) == 6:
         p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-    elif len(p) == 4:  # Simple variable declaration: VAR IDENTIFIER SEMI
+    elif len(p) == 4:
         p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
 
 
@@ -218,18 +220,21 @@ def p_empty_statement(p):
     '''empty_statement : SEMI'''
     p[0] = None
 
-
+# FIX: Add rule for assignment to a dereferenced pointer
 def p_assignment_statement(p):
     '''assignment_statement : IDENTIFIER ASSIGN expression SEMI
-                            | array_access ASSIGN expression SEMI'''
-    if isinstance(p[1], str):  # This is the IDENTIFIER ASSIGN ... rule
+                            | array_access ASSIGN expression SEMI
+                            | STAR expression ASSIGN expression SEMI'''
+    if p.slice[1].type == 'STAR': # Handle *p = ...
+        target_node = UnaryOpNode('*', p[2], line_no=p.lineno(1))
+        p[0] = AssignmentNode(target_node, p[4], line_no=p.lineno(3))
+    elif isinstance(p[1], str):  # This is the IDENTIFIER ASSIGN ... rule
         p[0] = AssignmentNode(
             target_name=IdentifierNode(p[1], line_no=p.lineno(1)),
             value_expr=p[3],
             line_no=p.lineno(2)
         )
     else:  # This is the array_access ASSIGN ... rule
-        # p[1] is already a complete ArrayAccessNode from p_array_access
         p[0] = AssignmentNode(
             target_name=p[1],
             value_expr=p[3],
@@ -376,23 +381,26 @@ def p_expression_additive(p):
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-
+# FIX: Use STAR for multiplication
 def p_expression_multiplicative(p):
-    '''expression_multiplicative : expression_multiplicative TIMES expression_unary
+    '''expression_multiplicative : expression_multiplicative STAR expression_unary
                                  | expression_unary'''
     if len(p) == 2:
         p[0] = p[1]
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-
+# FIX: Add rules for unary pointer operators
 def p_expression_unary(p):
     '''expression_unary : NOT_LOGICAL expression_unary
                         | MINUS expression_unary %prec UMINUS
+                        | AMPERSAND expression_unary %prec UNARY_PTR
+                        | STAR expression_unary %prec UNARY_PTR
                         | primary_expression'''
     if len(p) == 2:
         p[0] = p[1]
     else:
+        # Using a generic UnaryOpNode for all unary operators
         p[0] = UnaryOpNode(p[1], p[2], line_no=p.slice[1].lineno)
 
 
@@ -408,7 +416,7 @@ def p_primary_expression(p):
         p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'LPAREN':
         p[0] = p[2]
-    else: # This covers function_call_actual and the new array_access
+    else:
         p[0] = p[1]
 
 
@@ -458,7 +466,7 @@ def p_error(p):
     else:
         print(f"PLY Parser: Syntax error at EOF.")
 
-# This section and below are unchanged
+
 parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
 
 from code_generator import SALCodeGenerator
@@ -505,45 +513,41 @@ def compile_c_ssl_string_to_sal(c_ssl_code_string):
 
 
 if __name__ == '__main__':
-    test_ssl_for_var_init_content = """
+    # Simple test to ensure the new syntax doesn't break existing multiplication
+    test_ssl_mult_and_pointers = """
     func main() {
-        var sum_total;
-        sum_total = 0;
-        for (var i = 1; i <= 2; i = i + 1) { print i; sum_total = sum_total + i; }
-        print 1000;
-        for (var j = 5; j >= 3; j = j - 1) { print j; sum_total = sum_total + j; }
-        print 2000;
-        print sum_total;
-        var k;
-        for (k = 10; k < 12; k = k+1) { print k; }
+        var x;
+        x = 5 * 10; // Test multiplication
+        print x;
+
+        var p;
+        var y;
+        y = 42;
+        p = &y;     // Test address-of
+        print *p;   // Test dereference
+        *p = 100;   // Test assignment to dereference
+        print y;
     }
     """
-    ssl_input_file_path = "test_for_var_init_ply_direct.ssl"
-    sal_output_file_path = "SAL_from_c_ply_for_var_init_direct.sal"
+    ssl_input_file_path = "test_ptr_syntax_direct.ssl"
+    sal_output_file_path = "SAL_from_c_ply_ptr_syntax_direct.sal"
 
     try:
         with open(ssl_input_file_path, 'w') as f:
-            f.write(test_ssl_for_var_init_content)
+            f.write(test_ssl_mult_and_pointers)
         print(f"Test SSL content written to '{ssl_input_file_path}'")
     except Exception as e:
         print(f"Error creating test file '{ssl_input_file_path}': {e}.")
         sys.exit(1)
 
-    print(f"\n--- Running c_ply_compiler.py (For Loop Var Init Test) directly from '{ssl_input_file_path}' ---")
-    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_ssl_for_var_init_content)
+    print(f"\n--- Running c_ply_compiler.py (Pointer Syntax Test) directly from '{ssl_input_file_path}' ---")
+    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_ssl_mult_and_pointers)
 
     if had_errors or generated_sal is None:
-        print("\nC-SSL COMPILATION FAILED (For Loop Var Init Test - Direct Run).")
+        print("\nC-SSL COMPILATION FAILED (Pointer Syntax Test - Direct Run).")
     else:
-        print("\nC-SSL COMPILATION SUCCESSFUL (For Loop Var Init Test - Direct Run).")
-        final_sal_for_test = generated_sal.strip()
-        if final_sal_for_test and not final_sal_for_test.upper().endswith("HALT"):
-            final_sal_for_test += "\nHALT // Auto-added by c_ply_compiler.py __main__ for testing"
-        elif not final_sal_for_test:
-            final_sal_for_test = "HALT // Program was empty, HALT added by c_ply_compiler.py __main__"
-        try:
-            with open(sal_output_file_path, 'w') as f:
-                f.write(final_sal_for_test)
-            print(f"Full SAL saved to '{sal_output_file_path}'")
-        except IOError as e:
-            print(f"Error saving SAL: {e}")
+        print("\nC-SSL COMPILATION SUCCESSFUL (Pointer Syntax Test - Direct Run).")
+        # For a direct run, we just check if it compiles without error.
+        # The generated SAL might be garbage until Phase 2 is done.
+        print("\n--- Generated SAL (might be incorrect until Phase 2) ---")
+        print(generated_sal)
