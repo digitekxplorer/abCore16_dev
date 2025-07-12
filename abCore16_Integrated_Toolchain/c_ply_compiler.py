@@ -12,20 +12,21 @@ from ast_nodes import (
     FunctionDefinitionNode, ReturnNode,
     ExpressionStatementNode, FunctionCallNode,
     ForNode, VarDeclNode,
-    ArrayDeclNode, ArrayAccessNode
+    ArrayDeclNode, ArrayAccessNode, PostfixOpNode,
+    SwitchNode, CaseNode, BreakNode
 )
 
 # --- Tokenizer (Lexer) Definition ---
-# FIX: Added AMPERSAND and STAR for pointer operations
 tokens = (
     'NUMBER', 'IDENTIFIER',
-    'PLUS', 'MINUS', 'STAR',  # 'TIMES' is replaced by 'STAR'
+    'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
     'AMPERSAND', 'ASSIGN', 'SEMI',
-    'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA',
+    'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA', 'COLON',
     'EQ', 'NEQ', 'LE', 'GE', 'LT', 'GT',
     'AND_LOGICAL', 'OR_LOGICAL', 'NOT_LOGICAL',
     'PRINT', 'IF', 'ELSE', 'WHILE', 'FOR',
-    'FUNC', 'RETURN', 'VAR'
+    'FUNC', 'RETURN', 'VAR',
+    'SWITCH', 'CASE', 'DEFAULT', 'BREAK' # <-- ADDED THIS LINE
 )
 
 t_ignore = ' \t'
@@ -39,6 +40,8 @@ t_LT = r'<'
 t_GT = r'>'
 t_ASSIGN = r'='
 t_NOT_LOGICAL = r'!'
+t_PLUSPLUS = r'\+\+'
+t_MINUSMINUS = r'--'
 t_PLUS = r'\+'
 t_MINUS = r'-'
 # t_TIMES is removed. STAR will handle multiplication and dereference.
@@ -50,14 +53,14 @@ t_RBRACE = r'\}'
 t_LBRACKET = r'\['
 t_RBRACKET = r'\]'
 t_COMMA = r','
-
-# FIX: Add lexer rules for new pointer tokens
+t_COLON = r':'
 t_AMPERSAND = r'&'
 t_STAR = r'\*' # This now serves for both multiplication and dereferencing
 
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
     'func': 'FUNC', 'return': 'RETURN', 'var': 'VAR',
+    'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
 }
 
 
@@ -97,13 +100,16 @@ def t_error(t):
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
-# FIX: Update precedence for unary pointer operators
 precedence = (
     ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'),
     ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
     ('left', 'PLUS', 'MINUS'),
-    ('left', 'STAR'), # Renamed from TIMES
-    ('right', 'NOT_LOGICAL', 'UMINUS', 'UNARY_PTR') # New group for pointer ops
+    ('left', 'STAR'),
+    ('right', 'NOT_LOGICAL', 'UMINUS', 'UNARY_PTR'),
+    ('left', 'PLUSPLUS', 'MINUSMINUS'),
+    # Add new precedence rules for if/else ambiguity
+    ('right', 'IFX'),
+    ('right', 'ELSE')
 )
 start = 'program'
 
@@ -196,7 +202,9 @@ def p_statement(p):
                  | return_statement
                  | empty_statement
                  | expression_statement
-                 | variable_declaration_statement'''
+                 | variable_declaration_statement
+                 | switch_statement
+                 | break_statement'''
     p[0] = p[1]
 
 
@@ -248,14 +256,14 @@ def p_print_statement(p):
 
 
 def p_if_statement(p):
-    '''if_statement : IF LPAREN expression RPAREN block_statement else_clause'''
-    p[0] = IfNode(p[3], p[5], p[6], line_no=p.lineno(1))
-
-
-def p_else_clause(p):
-    '''else_clause : ELSE block_statement
-                   | empty'''
-    p[0] = p[2] if len(p) == 3 else None
+    '''if_statement : IF LPAREN expression RPAREN statement %prec IFX
+                    | IF LPAREN expression RPAREN statement ELSE statement'''
+    if len(p) == 6:
+        # This rule handles an 'if' without an 'else'
+        p[0] = IfNode(condition=p[3], true_block=p[5], false_block=None, line_no=p.lineno(1))
+    else:
+        # This rule handles both 'if-else' and 'if-else if' constructs
+        p[0] = IfNode(condition=p[3], true_block=p[5], false_block=p[7], line_no=p.lineno(1))
 
 
 def p_while_statement(p):
@@ -331,6 +339,47 @@ def p_for_statement(p):
             update_stmt_node = None
     p[0] = ForNode(init_node_for_fornode, condition_expr_node, update_stmt_node, body_node, line_no=p.lineno(1))
 
+def p_switch_statement(p):
+    '''switch_statement : SWITCH LPAREN expression RPAREN LBRACE case_list RBRACE'''
+    p[0] = SwitchNode(condition=p[3], cases=p[6], line_no=p.lineno(1))
+
+
+def p_case_list(p):
+    '''case_list : case_list case_block
+                 | empty'''
+    if len(p) == 3:
+        lst = p[1] if p[1] is not None else []
+        if p[2] is not None:
+            lst.append(p[2])
+        p[0] = lst
+    else:
+        p[0] = []
+
+
+def p_case_block(p):
+    '''case_block : case_label statement_list'''
+    # The case_label (p[1]) is a tuple: (value_node, line_number)
+    value_node, line_num = p[1]
+    p[0] = CaseNode(value_expr=value_node, statements=p[2], line_no=line_num)
+
+
+def p_case_label(p):
+    '''case_label : CASE NUMBER COLON
+                  | DEFAULT COLON'''
+    if len(p) == 4:
+        # 'case NUMBER:'
+        # We need to create a NumberNode for the constant value
+        value_node = NumberNode(p[2], line_no=p.lineno(2))
+        p[0] = (value_node, p.lineno(1))
+    else:
+        # 'default:'
+        p[0] = (None, p.lineno(1))
+
+
+def p_break_statement(p):
+    '''break_statement : BREAK SEMI'''
+    p[0] = BreakNode()
+
 
 def p_expression(p):
     '''expression : expression OR_LOGICAL expression_and
@@ -396,13 +445,22 @@ def p_expression_unary(p):
                         | MINUS expression_unary %prec UMINUS
                         | AMPERSAND expression_unary %prec UNARY_PTR
                         | STAR expression_unary %prec UNARY_PTR
-                        | primary_expression'''
+                        | postfix_expression''' # <-- CHANGED
     if len(p) == 2:
         p[0] = p[1]
     else:
         # Using a generic UnaryOpNode for all unary operators
         p[0] = UnaryOpNode(p[1], p[2], line_no=p.slice[1].lineno)
 
+def p_postfix_expression(p):
+    '''postfix_expression : primary_expression
+                          | postfix_expression PLUSPLUS
+                          | postfix_expression MINUSMINUS'''
+    if len(p) == 2:
+        p[0] = p[1] # It's just a primary_expression
+    else:
+        # It's an increment/decrement operation
+        p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
 
 def p_primary_expression(p):
     '''primary_expression : NUMBER
