@@ -1,4 +1,4 @@
-# code_generator.py
+# code_generator.py (with pointer type tracking)
 
 from ast_nodes import (
     Node, ProgramNode, StatementNode, AssignmentNode, PrintNode, IfNode, WhileNode,
@@ -8,7 +8,6 @@ from ast_nodes import (
     ForNode, VarDeclNode,
     ArrayDeclNode, ArrayAccessNode
 )
-# NEW: Import the centralized constant for the global data address
 from abcore16_defs import GLOBAL_DATA_START_ADDR
 
 # --- Global Debug Switch for Code Generator ---
@@ -21,22 +20,21 @@ class SALCodeGenerator:
         self.label_counter = 0
 
         self.symbol_tables = [{}]
-        # FIX: Use the imported constant
         self.scope_stack_info = [
             {'type': 'global', 'var_count': 0, 'base_offset': GLOBAL_DATA_START_ADDR, 'name': '_global'}]
 
-        # FIX: Use the imported constant
         self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
 
-        self._compiler_temp_pool_master = ["R7", "R6"]
+        self._compiler_temp_pool_master = ["R7", "R6", "R4", "R3"]
         self._available_temp_regs = []
         self._currently_used_temps = set()
         self.current_function_context = None
         self.function_meta_map = {}
         self.return_value_reg = "R0"
         self.frame_pointer_reg = "R5"
+        self.scratch_reg_1 = "R2"
 
-    # ... (helper methods like _new_temp are unchanged) ...
+    # ... (all methods from _initialize_temp_regs to _exit_scope are unchanged) ...
     def _initialize_temp_regs(self):
         self._available_temp_regs = list(self._compiler_temp_pool_master)
         self._available_temp_regs.reverse()
@@ -83,14 +81,30 @@ class SALCodeGenerator:
             self.symbol_tables.pop()
             self.scope_stack_info.pop()
 
-    def _add_symbol(self, name, symbol_type, location_or_offset, size=2):
+    # FIX: _add_symbol now includes data_type
+    def _add_symbol(self, name, symbol_type, location_or_offset, size=2, data_type='word'):
         name_upper = name.upper()
         current_scope_sym_table = self.symbol_tables[-1]
         if name_upper in current_scope_sym_table:
             raise Exception(
                 f"CodeGen Error: Symbol '{name}' redefined in current scope ('{self.scope_stack_info[-1]['name']}').")
-        current_scope_sym_table[name_upper] = {'type': symbol_type, 'loc': location_or_offset, 'size': size,
-                                               'scope_name': self.scope_stack_info[-1]['name']}
+        current_scope_sym_table[name_upper] = {
+            'type': symbol_type,
+            'loc': location_or_offset,
+            'size': size,
+            'scope_name': self.scope_stack_info[-1]['name'],
+            'data_type': data_type  # 'word' or 'pointer'
+        }
+
+    # FIX: _update_symbol_type for promoting a var to a pointer
+    def _update_symbol_type(self, name, new_data_type):
+        name_upper = name.upper()
+        for scope_table in reversed(self.symbol_tables):
+            if name_upper in scope_table:
+                scope_table[name_upper]['data_type'] = new_data_type
+                if CG_DEBUG_VERBOSE: self.emit(f"// SYMBOL UPDATE: {name} is now a {new_data_type}")
+                return
+        raise Exception(f"CodeGen Internal Error: Cannot update type for unknown symbol '{name}'.")
 
     def _lookup_symbol(self, name):
         name_upper = name.upper()
@@ -99,55 +113,91 @@ class SALCodeGenerator:
                 return scope_table[name_upper]
         return None
 
-    def _allocate_storage_for_decl(self, var_name_node):
-        var_name = var_name_node.name
+    # FIX: New helper to determine if an expression results in a pointer
+    def _get_expression_type(self, node):
+        if isinstance(node, IdentifierNode):
+            symbol = self._lookup_symbol(node.name)
+            return symbol['data_type'] if symbol else 'word'
+        if isinstance(node, UnaryOpNode) and node.op == '&':
+            return 'pointer'  # The result of an address-of operation is always a pointer
+        if isinstance(node, UnaryOpNode) and node.op == '*':
+            # The result of dereferencing a pointer is a word value
+            return 'word'
+        if isinstance(node, BinaryOpNode) and node.op in ['+', '-']:
+            # If either side of an add/sub is a pointer, the result is a pointer
+            left_type = self._get_expression_type(node.left)
+            right_type = self._get_expression_type(node.right)
+            if left_type == 'pointer' or right_type == 'pointer':
+                return 'pointer'
+        # Default case for numbers, other expressions
+        return 'word'
+
+    def _allocate_storage_for_decl(self, name_node, size_in_bytes=2, is_array=False, data_type='word'):
+        var_name = name_node.name
         if var_name.upper() in self.symbol_tables[-1]:
             raise Exception(
-                f"CodeGen Error: Variable '{var_name}' (Line: {var_name_node.line_no}) already declared in this scope.")
+                f"CodeGen Error: Variable '{var_name}' (Line: {name_node.line_no}) already declared in this scope.")
+
         is_in_function_scope = any(s['type'] == 'function' for s in self.scope_stack_info)
         if is_in_function_scope:
-            symbol_type = 'local'
-            function_scope_info_for_local = next(s for s in reversed(self.scope_stack_info) if s['type'] == 'function')
-            if 'fp_offset_next_local' not in function_scope_info_for_local:
+            symbol_type = 'local_array' if is_array else 'local'
+            function_scope_info = next(s for s in reversed(self.scope_stack_info) if s['type'] == 'function')
+            if 'fp_offset_next_local' not in function_scope_info:
                 raise Exception("CodeGen Internal Error: fp_offset_next_local not set.")
-            location = function_scope_info_for_local['fp_offset_next_local']
-            function_scope_info_for_local['fp_offset_next_local'] -= 2
-            self._add_symbol(var_name, symbol_type, location)
+
+            function_scope_info['fp_offset_next_local'] -= size_in_bytes
+            location = function_scope_info['fp_offset_next_local']
+
+            self._add_symbol(var_name, symbol_type, location, size=size_in_bytes, data_type=data_type)
         else:
-            symbol_type = 'global'
+            symbol_type = 'array' if is_array else 'global'
             location = self.next_available_global_data_address
-            self.next_available_global_data_address += 2  # Byte-addressable: each word is 2 bytes
-            self._add_symbol(var_name, symbol_type, location)
+            self.next_available_global_data_address += size_in_bytes
+            self._add_symbol(var_name, symbol_type, location, size=size_in_bytes, data_type=data_type)
+            if is_array:
+                self.emit(
+                    f"// Allocating {size_in_bytes // 2} words ({size_in_bytes} bytes) for global array '{var_name}' at 0x{location:04X}")
+
         return self._lookup_symbol(var_name)
 
+    # ... (generate_address_of_array_element is unchanged) ...
     def _generate_address_of_array_element(self, node: ArrayAccessNode):
         array_name = node.name_node.name
         self.emit(f"// Calculating address for {array_name}[...]")
         symbol_info = self._lookup_symbol(array_name)
-        if not symbol_info or symbol_info['type'] != 'array':
+        if not symbol_info or symbol_info['type'] not in ['array', 'local_array']:
             raise Exception(f"CodeGen Error: '{array_name}' is not a declared array.")
-        base_address = symbol_info['loc']
+
         index_reg = node.index_expr_node.accept(self)
         addr_reg = self._new_temp()
-        self.emit(f"LOAD {addr_reg}, #{base_address}")
-        # Scale the index by 2 for byte-addressable memory
+
+        if symbol_info['type'] == 'local_array':
+            self.emit(f"MOV {addr_reg}, {self.frame_pointer_reg}")
+            offset_reg = self._new_temp()
+            offset_val = symbol_info['loc']
+            self.emit(f"LOAD {offset_reg}, #{abs(offset_val)}")
+            self.emit(f"SUB {addr_reg}, {offset_reg}")
+            self._free_temp(offset_reg)
+        else:
+            base_address = symbol_info['loc']
+            self.emit(f"LOAD {addr_reg}, #{base_address}")
+
         self.emit(f"SHL {index_reg}, #1")
         self.emit(f"ADD {addr_reg}, {index_reg}")
         self._free_temp(index_reg)
         return addr_reg
 
+    # ... (generate is unchanged) ...
     def generate(self, ast_root_node):
         self.sal_code = []
         self._initialize_temp_regs()
         self.symbol_tables = [{'type': 'global', 'name': '_global'}]
         self.scope_stack_info = [{'type': 'global', 'var_count': 0, 'name': '_global'}]
-        # FIX: Use the imported constant
         self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
         self.current_function_context = None
         self.function_meta_map = {}
 
         if not isinstance(ast_root_node, ProgramNode): return ""
-        # ... (rest of generate method is unchanged) ...
         if CG_DEBUG_VERBOSE: print("// DEBUG_CG: Starting generate() - 1st Pass...")
         if hasattr(ast_root_node, 'statements'):
             for stmt in ast_root_node.statements:
@@ -159,11 +209,14 @@ class SALCodeGenerator:
                     epilogue_label = self.new_label(f"EPILOGUE_{func_name_upper}")
                     param_names = [p.name.upper() for p in stmt.params_nodes]
                     self._enter_scope('function', func_name_upper + "_countscope_pass")
-                    num_locals = self._count_local_vars_recursive(stmt.body_node)
+                    local_storage_bytes = self._calculate_local_storage_size_recursive(stmt.body_node)
                     self._exit_scope()
-                    self.function_meta_map[func_name_upper] = {'sal_label': sal_label, 'param_names': param_names,
-                                                               'epilogue_label': epilogue_label,
-                                                               'num_locals_from_scan': num_locals}
+                    self.function_meta_map[func_name_upper] = {
+                        'sal_label': sal_label,
+                        'param_names': param_names,
+                        'epilogue_label': epilogue_label,
+                        'local_storage_bytes': local_storage_bytes
+                    }
         global_code_sal = []
         temp_sal_holder = self.sal_code
         self.sal_code = global_code_sal
@@ -200,47 +253,50 @@ class SALCodeGenerator:
                 f"// WARNING CG: End of gen, {len(self._currently_used_temps)} temp regs used: {self._currently_used_temps}")
         return "\n".join(self.sal_code)
 
-    def _count_local_vars_recursive(self, ast_node):
-        # ... (this function is unchanged) ...
-        count = 0
-        if ast_node is None: return 0
+    # ... (_calculate_local_storage_size_recursive and visit_ArrayDeclNode are unchanged) ...
+    def _calculate_local_storage_size_recursive(self, ast_node):
+        size = 0
+        if ast_node is None:
+            return 0
+
+        is_in_function = any(s['type'] == 'function' for s in self.scope_stack_info)
+
         if isinstance(ast_node, VarDeclNode):
-            if any(s['type'] == 'function' for s in self.scope_stack_info): count += 1
+            if is_in_function:
+                size += 2
         elif isinstance(ast_node, ArrayDeclNode):
-            pass
+            if is_in_function:
+                size += ast_node.size * 2
         elif isinstance(ast_node, ProgramNode) and hasattr(ast_node, 'statements'):
-            for stmt_in_block in ast_node.statements: count += self._count_local_vars_recursive(stmt_in_block)
+            for stmt_in_block in ast_node.statements:
+                size += self._calculate_local_storage_size_recursive(stmt_in_block)
         elif isinstance(ast_node, IfNode):
-            count += self._count_local_vars_recursive(ast_node.true_block)
-            if ast_node.false_block: count += self._count_local_vars_recursive(ast_node.false_block)
-        elif isinstance(ast_node, WhileNode):
-            count += self._count_local_vars_recursive(ast_node.body_block)
+            size += self._calculate_local_storage_size_recursive(ast_node.true_block)
+            if ast_node.false_block:
+                size += self._calculate_local_storage_size_recursive(ast_node.false_block)
         elif isinstance(ast_node, ForNode):
-            if isinstance(ast_node.init_node, VarDeclNode):
-                if any(s['type'] == 'function' for s in self.scope_stack_info): count += 1
-            count += self._count_local_vars_recursive(ast_node.body_node)
-        return count
+            if isinstance(ast_node.init_node, VarDeclNode) and is_in_function:
+                size += 2
+            size += self._calculate_local_storage_size_recursive(ast_node.body_node)
+
+        return size
 
     def visit_ArrayDeclNode(self, node):
         if CG_DEBUG_VERBOSE: self.emit(f"// ArrayDecl: {node.var_name_node.name}[{node.size}]")
-        if any(s['type'] != 'global' for s in self.scope_stack_info):
-            raise Exception("CodeGen Error: Local arrays not yet supported.")
-        array_name = node.var_name_node.name
-        if array_name.upper() in self.symbol_tables[-1]:
-            raise Exception(f"CodeGen Error: Symbol '{array_name}' already declared.")
-        base_address = self.next_available_global_data_address
-        array_size_in_elements = node.size
-        # Byte-addressable: allocation is in bytes
-        array_size_in_bytes = array_size_in_elements * 2
-        self.emit(
-            f"// Allocating {array_size_in_elements} words ({array_size_in_bytes} bytes) for array '{array_name}' at 0x{base_address:04X}")
-        self._add_symbol(array_name, 'array', base_address, size=array_size_in_elements)
-        self.next_available_global_data_address += array_size_in_bytes
+        array_size_in_bytes = node.size * 2
+        # For arrays, data_type can be considered 'pointer' as its name evaluates to its base address
+        self._allocate_storage_for_decl(node.var_name_node, array_size_in_bytes, is_array=True, data_type='pointer')
 
-    # ... (the rest of the file is unchanged) ...
+    # FIX: visit_VarDeclNode now checks for pointer initialization
     def visit_VarDeclNode(self, node):
         if CG_DEBUG_VERBOSE: self.emit(f"// VarDecl: {node.var_name_node.name} (Line: {node.line_no})")
-        symbol_info = self._allocate_storage_for_decl(node.var_name_node)
+
+        var_data_type = 'word'
+        if node.init_expr_node:
+            var_data_type = self._get_expression_type(node.init_expr_node)
+
+        symbol_info = self._allocate_storage_for_decl(node.var_name_node, is_array=False, data_type=var_data_type)
+
         if node.init_expr_node:
             expr_val_reg = node.init_expr_node.accept(self)
             if expr_val_reg is None or not isinstance(expr_val_reg, str):
@@ -249,9 +305,10 @@ class SALCodeGenerator:
             if not symbol_info:
                 raise Exception(
                     f"CodeGen Internal Error: Symbol info for '{node.var_name_node.name}' not found after allocation.")
+
             if symbol_info['type'] == 'global':
                 self.emit(f"STORE {expr_val_reg}, 0x{symbol_info['loc']:04X}")
-            elif symbol_info['type'] == 'local':
+            elif symbol_info['type'] in ['local', 'local_array']:
                 self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
             else:
                 raise Exception(
@@ -259,6 +316,7 @@ class SALCodeGenerator:
             if expr_val_reg in self._compiler_temp_pool_master:
                 self._free_temp(expr_val_reg)
 
+    # ... (visit_ArrayAccessNode is unchanged) ...
     def visit_ArrayAccessNode(self, node):
         addr_reg = self._generate_address_of_array_element(node)
         value_reg = self._new_temp()
@@ -268,19 +326,34 @@ class SALCodeGenerator:
 
     def visit_IdentifierNode(self, node):
         name_upper = node.name.upper()
-        if name_upper in ["R0", "R1", "R2", "R3", "R4"]:
+        if name_upper in ["R0", "R1", "R2", "R3", "R4", "R5"]:
             return name_upper
         symbol_info = self._lookup_symbol(node.name)
         if not symbol_info:
             raise Exception(
                 f"CodeGen Error: Undeclared identifier '{node.name}' (Line: {node.line_no if node.line_no else 'N/A'})")
-        if symbol_info['type'] == 'array':
-            raise Exception(
-                f"CodeGen Error: Cannot use array '{node.name}' as a simple value. Use array access syntax like '{node.name}[index]'. (Line: {node.line_no})")
+
+        if symbol_info['type'] in ['array', 'local_array']:
+            # FIX: An array name on its own resolves to its base address, which is a pointer.
+            self.emit(f"// Resolving array name '{node.name}' to its base address")
+            temp_reg = self._new_temp()
+            if symbol_info['type'] == 'array':  # Global array
+                self.emit(f"LOAD {temp_reg}, #{symbol_info['loc']}")
+            else:  # Local array
+                self.emit(f"MOV {temp_reg}, {self.frame_pointer_reg}")
+                offset_reg = self._new_temp()
+                offset_val = symbol_info['loc']
+                self.emit(f"LOAD {offset_reg}, #{abs(offset_val)}")
+                self.emit(f"SUB {temp_reg}, {offset_reg}")
+                self._free_temp(offset_reg)
+            return temp_reg
+
         temp_reg = self._new_temp()
         if symbol_info['type'] == 'global':
             self.emit(f"LOADM {temp_reg}, 0x{symbol_info['loc']:04X}")
-        elif symbol_info['type'] == 'param' or symbol_info['type'] == 'local':
+        elif symbol_info['type'] == 'param':
+            self.emit(f"LOADFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+        elif symbol_info['type'] == 'local':
             self.emit(f"LOADFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
         else:
             self._free_temp(temp_reg)
@@ -291,9 +364,27 @@ class SALCodeGenerator:
                 f"CodeGen Error: visit_IdentifierNode for '{node.name}' about to return invalid register: {temp_reg}")
         return temp_reg
 
+    # FIX: visit_AssignmentNode now promotes variables to pointers on address assignment
     def visit_AssignmentNode(self, node):
         target_node = node.target_name
+
         if isinstance(target_node, IdentifierNode):
+            # Check if we are assigning an address to this variable.
+            # If so, its data_type becomes 'pointer'.
+            value_type = self._get_expression_type(node.value_expr)
+            if value_type == 'pointer':
+                self._update_symbol_type(target_node.name, 'pointer')
+
+        if isinstance(target_node, UnaryOpNode) and target_node.op == '*':
+            self.emit(f"// --- Assignment to Dereferenced Pointer * (Line: {node.line_no}) ---")
+            addr_reg = target_node.operand.accept(self)
+            value_reg = node.value_expr.accept(self)
+            self.emit(f"STORI {value_reg}, {addr_reg} // Storing value from {value_reg} into address in {addr_reg}")
+            self._free_temp(value_reg)
+            self._free_temp(addr_reg)
+            return
+
+        elif isinstance(target_node, IdentifierNode):
             expr_val_reg = node.value_expr.accept(self)
             if expr_val_reg is None: raise Exception(f"RHS of assignment to '{target_node.name}' is invalid.")
             symbol_info = self._lookup_symbol(target_node.name)
@@ -308,15 +399,16 @@ class SALCodeGenerator:
             self._free_temp(expr_val_reg)
         elif isinstance(target_node, ArrayAccessNode):
             self.emit(f"// Assignment to array element {target_node.name_node.name}[...]")
-            addr_reg = self._generate_address_of_array_element(target_node)
             value_reg = node.value_expr.accept(self)
             if value_reg is None: raise Exception("RHS of array assignment is invalid.")
+            addr_reg = self._generate_address_of_array_element(target_node)
             self.emit(f"STORI {value_reg}, {addr_reg} // Mem[{addr_reg}] = {value_reg}")
             self._free_temp(addr_reg)
             self._free_temp(value_reg)
         else:
             raise Exception(f"CodeGen Error: Invalid target for assignment (Type: {type(target_node).__name__}).")
 
+    # ... (rest of file is unchanged, including BinaryOpNode for now) ...
     def visit_ProgramNode(self, node):
         if node and node.statements:
             for stmt_node in node.statements:
@@ -334,16 +426,16 @@ class SALCodeGenerator:
             'sal_label': func_meta['sal_label'],
             'epilogue_label': func_meta['epilogue_label'],
             'param_map': {},
-            'num_locals_from_scan': func_meta['num_locals_from_scan']
+            'local_storage_bytes': func_meta['local_storage_bytes']
         }
         self._enter_scope('function', scope_name=func_name_upper)
         current_function_scope_info = self.scope_stack_info[-1]
 
-        current_function_scope_info['fp_offset_next_local'] = -2
+        current_function_scope_info['fp_offset_next_local'] = 0
 
         for i, param_node in enumerate(node.params_nodes):
             param_name_upper = param_node.name.upper()
-            offset = 2 + i
+            offset = 6 + (i * 2)
             self.current_function_context['param_map'][param_name_upper] = offset
             self._add_symbol(param_node.name, 'param', offset)
 
@@ -352,14 +444,18 @@ class SALCodeGenerator:
         self.emit(f"PUSH {self.frame_pointer_reg}")
         self.emit(f"MOVFRSP {self.frame_pointer_reg}")
 
-        num_locals_to_alloc = self.current_function_context['num_locals_from_scan']
-
+        local_storage_bytes_to_alloc = self.current_function_context['local_storage_bytes']
         if CG_DEBUG_VERBOSE: self.emit(
-            f"// DEBUG_CG: Function '{func_name_upper}' allocating space for {num_locals_to_alloc} locals based on scan.")
+            f"// DEBUG_CG: Function '{func_name_upper}' allocating {local_storage_bytes_to_alloc} bytes for local storage.")
 
-        if num_locals_to_alloc > 0:
-            for _ in range(num_locals_to_alloc):
-                self.emit(f"PUSH R0 // Allocate 1 word (2 bytes) for a local")
+        if local_storage_bytes_to_alloc > 0:
+            self.emit(f"// Allocating {local_storage_bytes_to_alloc} bytes on stack for locals")
+            alloc_reg = self._new_temp()
+            self.emit(f"LOAD {alloc_reg}, #{local_storage_bytes_to_alloc}")
+            self.emit(f"MOVFRSP {self.scratch_reg_1}")
+            self.emit(f"SUB {self.scratch_reg_1}, {alloc_reg}")
+            self.emit(f"MOVTOSP {self.scratch_reg_1}")
+            self._free_temp(alloc_reg)
 
         if node.body_node:
             node.body_node.accept(self)
@@ -376,7 +472,7 @@ class SALCodeGenerator:
             self.emit(f"JMP {self.current_function_context['epilogue_label']}")
 
         self.emit(f"{self.current_function_context['epilogue_label']}:")
-        if num_locals_to_alloc > 0:
+        if local_storage_bytes_to_alloc > 0:
             self.emit(f"MOVTOSP {self.frame_pointer_reg}")
 
         self.emit(f"POP {self.frame_pointer_reg}")
@@ -389,16 +485,18 @@ class SALCodeGenerator:
             node.init_node.accept(self)
         loop_body_label = self.new_label("FOR_BODY")
         loop_condition_label = self.new_label("FOR_COND")
-        loop_update_target_label = self.new_label("FOR_UPDATE")
+        loop_update_label = self.new_label("FOR_UPDATE")
         loop_end_label = self.new_label("FOR_END")
+
         self.emit(f"JMP {loop_condition_label}")
         self.emit(f"{loop_body_label}:")
         if node.body_node:
             node.body_node.accept(self)
-        self.emit(f"{loop_update_target_label}:")
+
+        self.emit(f"{loop_update_label}:")
         if node.update_expr_stmt_node:
             node.update_expr_stmt_node.accept(self)
-        self.emit(f"JMP {loop_condition_label}")
+
         self.emit(f"{loop_condition_label}:")
         if node.condition_expr_node:
             self._generate_conditional_branch(node.condition_expr_node, loop_body_label, loop_end_label)
@@ -430,65 +528,71 @@ class SALCodeGenerator:
                 self.emit(f"{lbl_eval_right}:")
                 self._generate_conditional_branch(condition_node.right, true_branch_label, false_branch_label)
                 return
+
             if op in ['==', '!=', '<', '>', '<=', '>=']:
                 reg_left = condition_node.left.accept(self)
                 reg_right = condition_node.right.accept(self)
-                if reg_left is None or not isinstance(reg_left, str) or \
-                        reg_right is None or not isinstance(reg_right, str):
-                    raise Exception(
-                        f"CodeGen Error: Operand for comparison '{op}' is not a valid register name. Left='{reg_left}', Right='{reg_right}'.")
                 self.emit(f"CMP {reg_left}, {reg_right}")
-                if reg_left in self._compiler_temp_pool_master: self._free_temp(reg_left)
-                if reg_right in self._compiler_temp_pool_master: self._free_temp(reg_right)
+                self._free_temp(reg_left);
+                self._free_temp(reg_right)
+
                 if op == '==':
                     self.emit(f"JE {true_branch_label}")
                 elif op == '!=':
                     self.emit(f"JNE {true_branch_label}")
                 elif op == '<':
-                    lbl_sf1 = self.new_label("SLT_SF1");
-                    self.emit(f"JS {lbl_sf1}");
-                    self.emit(f"JO {true_branch_label}");
+                    lbl = self.new_label("SLT");
+                    self.emit(f"JS {lbl}");
+                    self.emit(
+                        f"JO {true_branch_label}");
                     self.emit(f"JMP {false_branch_label}");
-                    self.emit(f"{lbl_sf1}:");
-                    self.emit(f"JNO {true_branch_label}");
+                    self.emit(
+                        f"{lbl}:");
+                    self.emit(f"JNO {true_branch_label}")
                 elif op == '>=':
-                    lbl_sf1 = self.new_label("SGE_SF1");
-                    self.emit(f"JS {lbl_sf1}");
-                    self.emit(f"JNO {true_branch_label}");
+                    lbl = self.new_label("SGE");
+                    self.emit(f"JS {lbl}");
+                    self.emit(
+                        f"JNO {true_branch_label}");
                     self.emit(f"JMP {false_branch_label}");
-                    self.emit(f"{lbl_sf1}:");
-                    self.emit(f"JO {true_branch_label}");
+                    self.emit(
+                        f"{lbl}:");
+                    self.emit(f"JO {true_branch_label}")
                 elif op == '>':
                     self.emit(f"JE {false_branch_label}");
-                    lbl_sf1 = self.new_label("SGT_SF1");
-                    self.emit(f"JS {lbl_sf1}");
+                    lbl = self.new_label("SGT");
+                    self.emit(
+                        f"JS {lbl}");
                     self.emit(f"JNO {true_branch_label}");
-                    self.emit(f"JMP {false_branch_label}");
-                    self.emit(f"{lbl_sf1}:");
-                    self.emit(f"JO {true_branch_label}");
+                    self.emit(
+                        f"JMP {false_branch_label}");
+                    self.emit(f"{lbl}:");
+                    self.emit(f"JO {true_branch_label}")
                 elif op == '<=':
                     self.emit(f"JE {true_branch_label}");
-                    lbl_sf1 = self.new_label("SLE_SF1");
-                    self.emit(f"JS {lbl_sf1}");
+                    lbl = self.new_label("SLE");
+                    self.emit(
+                        f"JS {lbl}");
                     self.emit(f"JO {true_branch_label}");
-                    self.emit(f"JMP {false_branch_label}");
-                    self.emit(f"{lbl_sf1}:");
-                    self.emit(f"JNO {true_branch_label}");
+                    self.emit(
+                        f"JMP {false_branch_label}");
+                    self.emit(f"{lbl}:");
+                    self.emit(f"JNO {true_branch_label}")
+
                 self.emit(f"JMP {false_branch_label}")
                 return
         elif isinstance(condition_node, UnaryOpNode) and condition_node.op == '!':
             self._generate_conditional_branch(condition_node.operand, false_branch_label, true_branch_label)
             return
+
         result_reg = condition_node.accept(self)
-        if result_reg is None or not isinstance(result_reg, str):
-            raise Exception(
-                f"CodeGen Error: Condition node '{condition_node!r}' did not evaluate to a valid register name.")
+        if result_reg is None or not isinstance(result_reg, str): raise Exception(
+            f"CodeGen Error: Condition node '{condition_node!r}' did not evaluate to a valid register name.")
         temp_zero_reg = self._new_temp()
         self.emit(f"LOAD {temp_zero_reg}, #0")
         self.emit(f"CMP {result_reg}, {temp_zero_reg}")
-        self._free_temp(temp_zero_reg)
-        if result_reg in self._compiler_temp_pool_master:
-            self._free_temp(result_reg)
+        self._free_temp(temp_zero_reg);
+        self._free_temp(result_reg)
         self.emit(f"JNE {true_branch_label}")
         self.emit(f"JMP {false_branch_label}")
 
@@ -528,209 +632,270 @@ class SALCodeGenerator:
         return reg
 
     def visit_BinaryOpNode(self, node):
+        op = node.op
+        if op in ['&&', '||']:
+            # This logic is unchanged
+            result_reg = self._new_temp()
+            end_label = self.new_label("LOGICAL_OP_END")
+            true_label = self.new_label("LOGICAL_OP_TRUE")
+            false_label = self.new_label("LOGICAL_OP_FALSE")
+
+            if op == '&&':
+                eval_right_label = self.new_label("AND_RIGHT")
+                self._generate_conditional_branch(node.left, eval_right_label, false_label)
+                self.emit(f"{eval_right_label}:")
+                self._generate_conditional_branch(node.right, true_label, false_label)
+            else:  # ||
+                eval_right_label = self.new_label("OR_RIGHT")
+                self._generate_conditional_branch(node.left, true_label, eval_right_label)
+                self.emit(f"{eval_right_label}:")
+                self._generate_conditional_branch(node.right, true_label, false_label)
+
+            self.emit(f"{true_label}:");
+            self.emit(f"LOAD {result_reg}, #1");
+            self.emit(f"JMP {end_label}")
+            self.emit(f"{false_label}:");
+            self.emit(f"LOAD {result_reg}, #0")
+            self.emit(f"{end_label}:")
+            return result_reg
+
+        # FIX: Pointer Arithmetic Implementation
+        if op in ['+', '-']:
+            left_type = self._get_expression_type(node.left)
+            right_type = self._get_expression_type(node.right)
+
+            # Check for pointer arithmetic: pointer + word OR word + pointer
+            if (left_type == 'pointer' and right_type == 'word') or \
+                    (left_type == 'word' and right_type == 'pointer'):
+
+                self.emit(f"// --- Pointer Arithmetic ({op}) ---")
+
+                reg_ptr = None
+                reg_int = None
+
+                if left_type == 'pointer':
+                    reg_ptr = node.left.accept(self)
+                    reg_int = node.right.accept(self)
+                else:  # right_type is pointer
+                    reg_int = node.left.accept(self)
+                    reg_ptr = node.right.accept(self)
+
+                # Scale the integer value by the word size (2)
+                self.emit(f"SHL {reg_int}, #1 // Scale integer for pointer arithmetic")
+
+                # Perform the operation
+                if op == '+':
+                    self.emit(f"ADD {reg_ptr}, {reg_int}")
+                else:  # Subtraction is only valid for `pointer - integer`
+                    if left_type != 'pointer':
+                        raise Exception("CodeGen Error: Cannot subtract a pointer from an integer.")
+                    self.emit(f"SUB {reg_ptr}, {reg_int}")
+
+                self._free_temp(reg_int)
+                return reg_ptr  # The result is the new pointer address
+
+        # --- Fallback to original integer/comparison logic ---
         reg_left = node.left.accept(self)
         reg_right = node.right.accept(self)
-        if reg_left is None or not isinstance(reg_left, str):
-            raise Exception(f"CodeGen Error: Left operand for binary op '{node.op}' is invalid.")
-        if reg_right is None or not isinstance(reg_right, str):
-            raise Exception(f"CodeGen Error: Right operand for binary op '{node.op}' is invalid.")
-        op = node.op
+        if reg_left is None or reg_right is None: raise Exception(
+            f"CodeGen Error: Invalid operand for binary op '{op}'.")
+
         result_reg = reg_left
         if reg_left not in self._compiler_temp_pool_master:
-            result_reg = self._new_temp()
+            result_reg = self._new_temp();
             self.emit(f"MOV {result_reg}, {reg_left}")
-        if op == '+':
-            self.emit(f"ADD {result_reg}, {reg_right}")
-        elif op == '-':
-            self.emit(f"SUB {result_reg}, {reg_right}")
-        elif op == '*':
+
+        # This part is unchanged
+        if op == '*':
             self.emit(f"MUL {result_reg}, {reg_right}")
-        elif op == '&&':
-            self.emit(f"L_AND {result_reg}, {result_reg}, {reg_right}")
-        elif op == '||':
-            self.emit(f"L_OR {result_reg}, {result_reg}, {reg_right}")
         elif op in ['==', '!=', '<', '>', '<=', '>=']:
             self.emit(f"CMP {result_reg}, {reg_right}")
-            true_lbl_bool = self.new_label("BOOL_TRUE_VAL")
-            false_lbl_bool = self.new_label("BOOL_FALSE_VAL")
-            end_lbl_bool = self.new_label("BOOL_END_VAL")
+            true_lbl = self.new_label("BOOL_TRUE");
+            false_lbl = self.new_label("BOOL_FALSE");
+            end_lbl = self.new_label("BOOL_END")
             if op == '==':
-                self.emit(f"JE {true_lbl_bool}")
+                self.emit(f"JE {true_lbl}")
             elif op == '!=':
-                self.emit(f"JNE {true_lbl_bool}")
+                self.emit(f"JNE {true_lbl}")
             elif op == '<':
-                lbl_sf1 = self.new_label("SLT_SF1_BINVAL");
-                self.emit(f"JS {lbl_sf1}");
-                self.emit(f"JO {true_lbl_bool}");
-                self.emit(f"JMP {false_lbl_bool}");
-                self.emit(f"{lbl_sf1}:");
-                self.emit(f"JNO {true_lbl_bool}");
+                lbl = self.new_label("SLT"); self.emit(f"JS {lbl}"); self.emit(f"JO {true_lbl}"); self.emit(
+                    f"JMP {false_lbl}"); self.emit(f"{lbl}:"); self.emit(f"JNO {true_lbl}")
             elif op == '>=':
-                lbl_sf1 = self.new_label("SGE_SF1_BINVAL");
-                self.emit(f"JS {lbl_sf1}");
-                self.emit(f"JNO {true_lbl_bool}");
-                self.emit(f"JMP {false_lbl_bool}");
-                self.emit(f"{lbl_sf1}:");
-                self.emit(f"JO {true_lbl_bool}");
+                lbl = self.new_label("SGE"); self.emit(f"JS {lbl}"); self.emit(f"JNO {true_lbl}"); self.emit(
+                    f"JMP {false_lbl}"); self.emit(f"{lbl}:"); self.emit(f"JO {true_lbl}")
             elif op == '>':
-                self.emit(f"JE {false_lbl_bool}");
-                lbl_sf1 = self.new_label("SGT_SF1_BINVAL");
-                self.emit(f"JS {lbl_sf1}");
-                self.emit(f"JNO {true_lbl_bool}");
-                self.emit(f"JMP {false_lbl_bool}");
-                self.emit(f"{lbl_sf1}:");
-                self.emit(f"JO {true_lbl_bool}");
+                self.emit(f"JE {false_lbl}"); lbl = self.new_label("SGT"); self.emit(f"JS {lbl}"); self.emit(
+                    f"JNO {true_lbl}"); self.emit(f"JMP {false_lbl}"); self.emit(f"{lbl}:"); self.emit(f"JO {true_lbl}")
             elif op == '<=':
-                self.emit(f"JE {true_lbl_bool}");
-                lbl_sf1 = self.new_label("SLE_SF1_BINVAL");
-                self.emit(f"JS {lbl_sf1}");
-                self.emit(f"JO {true_lbl_bool}");
-                self.emit(f"JMP {false_lbl_bool}");
-                self.emit(f"{lbl_sf1}:");
-                self.emit(f"JNO {true_lbl_bool}");
-            self.emit(f"JMP {false_lbl_bool}");
-            self.emit(f"{true_lbl_bool}:");
+                self.emit(f"JE {true_lbl}"); lbl = self.new_label("SLE"); self.emit(f"JS {lbl}"); self.emit(
+                    f"JO {true_lbl}"); self.emit(f"JMP {false_lbl}"); self.emit(f"{lbl}:"); self.emit(f"JNO {true_lbl}")
+            self.emit(f"JMP {false_lbl}")
+            self.emit(f"{true_lbl}:");
             self.emit(f"LOAD {result_reg}, #1");
-            self.emit(f"JMP {end_lbl_bool}")
-            self.emit(f"{false_lbl_bool}:");
-            self.emit(f"LOAD {result_reg}, #0");
-            self.emit(f"{end_lbl_bool}:")
-        else:
-            self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled binary op '{op}'")
+            self.emit(f"JMP {end_lbl}")
+            self.emit(f"{false_lbl}:");
+            self.emit(f"LOAD {result_reg}, #0")
+            self.emit(f"{end_lbl}:")
+        else:  # This handles '+' and '-' for pure integer ops
+            if op == '+':
+                self.emit(f"ADD {result_reg}, {reg_right}")
+            elif op == '-':
+                self.emit(f"SUB {result_reg}, {reg_right}")
+            else:
+                self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled binary op '{op}'")
+
         if reg_right in self._compiler_temp_pool_master: self._free_temp(reg_right)
         return result_reg
 
     def visit_UnaryOpNode(self, node):
-        operand_reg = node.operand.accept(self)
-        if operand_reg is None or not isinstance(operand_reg, str):
-            raise Exception(f"CodeGen Error: Operand for unary op '{node.op}' is invalid.")
         op = node.op
+
+        if op == '&':
+            self.emit(f"// --- Address-Of & (Line: {node.line_no}) ---")
+            operand = node.operand
+            if isinstance(operand, IdentifierNode):
+                symbol = self._lookup_symbol(operand.name)
+                if not symbol: raise Exception(
+                    f"CodeGen Error: Cannot take address of undeclared variable '{operand.name}' on line {node.line_no}.")
+
+                addr_reg = self._new_temp()
+                # Using the data_type here is a bit redundant since array names resolve to pointers, but it's clear
+                if symbol['data_type'] == 'pointer' and symbol['type'] in ['array', 'local_array']:
+                    # This case handles &my_array
+                    if symbol['type'] == 'array':  # global array
+                        self.emit(f"LOAD {addr_reg}, #{symbol['loc']}")
+                    else:  # local array
+                        self.emit(f"MOV {addr_reg}, {self.frame_pointer_reg}")
+                        offset_reg = self._new_temp()
+                        self.emit(f"LOAD {offset_reg}, #{abs(symbol['loc'])}")
+                        self.emit(f"SUB {addr_reg}, {offset_reg}")
+                        self._free_temp(offset_reg)
+                elif symbol['type'] == 'global':
+                    self.emit(f"LOAD {addr_reg}, #{symbol['loc']}")
+                elif symbol['type'] in ['local', 'param']:
+                    self.emit(f"MOV {addr_reg}, {self.frame_pointer_reg}")
+                    offset_reg = self._new_temp()
+                    offset_val = symbol['loc']
+                    self.emit(f"LOAD {offset_reg}, #{abs(offset_val)}")
+                    if offset_val >= 0:
+                        self.emit(f"ADD {addr_reg}, {offset_reg}")
+                    else:
+                        self.emit(f"SUB {addr_reg}, {offset_reg}")
+                    self._free_temp(offset_reg)
+                else:
+                    self._free_temp(addr_reg)
+                    raise Exception(
+                        f"CodeGen Error: Cannot take address of symbol type '{symbol['type']}' for '{operand.name}'.")
+                return addr_reg
+
+            elif isinstance(operand, ArrayAccessNode):
+                return self._generate_address_of_array_element(operand)
+
+            else:
+                raise Exception(
+                    f"CodeGen Error: Address-of operator '&' can only be applied to variables or array elements on line {node.line_no}.")
+
+
+        elif op == '*':
+            self.emit(f"// --- Dereference * (as value) (Line: {node.line_no}) ---")
+            addr_reg = node.operand.accept(self)
+            value_reg = self._new_temp()
+            self.emit(f"LOADI {value_reg}, {addr_reg} // {value_reg} = Mem[{addr_reg}]")
+            self._free_temp(addr_reg)
+            return value_reg
+
+        operand_reg = node.operand.accept(self)
+        if operand_reg is None: raise Exception(f"CodeGen Error: Operand for unary op '{op}' is invalid.")
+
         result_reg = operand_reg
-        new_temp_for_result = False
         if operand_reg not in self._compiler_temp_pool_master:
-            result_reg = self._new_temp()
+            result_reg = self._new_temp();
             self.emit(f"MOV {result_reg}, {operand_reg}")
-            new_temp_for_result = True
+
         if op == '-':
-            temp_zero_reg = self._new_temp()
+            temp_zero_reg = self._new_temp();
             self.emit(f"LOAD {temp_zero_reg}, #0")
-            self.emit(f"SUB {temp_zero_reg}, {result_reg}")
+            self.emit(f"SUB {temp_zero_reg}, {result_reg}");
             self.emit(f"MOV {result_reg}, {temp_zero_reg}")
             self._free_temp(temp_zero_reg)
         elif op == '!':
             self.emit(f"L_NOT {result_reg}, {result_reg}")
         else:
             self.emit(f"LOAD {result_reg}, #-1 // ERROR: Unhandled unary op '{op}'")
-        if new_temp_for_result and operand_reg in self._compiler_temp_pool_master:
-            self._free_temp(operand_reg)
+
+        if result_reg != operand_reg: self._free_temp(operand_reg)
         return result_reg
 
     def visit_ExpressionStatementNode(self, node):
         if node.expression:
-            if isinstance(node.expression, AssignmentNode):
-                node.expression.accept(self)
-            else:
-                result_reg = node.expression.accept(self)
-                if result_reg and isinstance(result_reg, str) and result_reg in self._compiler_temp_pool_master:
-                    self._free_temp(result_reg)
+            result_reg = node.expression.accept(self)
+            if result_reg and isinstance(result_reg, str) and result_reg in self._compiler_temp_pool_master:
+                self._free_temp(result_reg)
 
     def visit_ReturnNode(self, node):
         if not self.current_function_context:
             raise Exception(f"CodeGen Error: Return statement outside of a function (Line: {node.line_no}).")
         if node.expr_node:
             expr_val_reg = node.expr_node.accept(self)
-            if expr_val_reg is None or not isinstance(expr_val_reg, str):
-                raise Exception(f"CodeGen Error: Return expression evaluated to invalid register.")
-            if expr_val_reg != self.return_value_reg:
-                self.emit(f"MOV {self.return_value_reg}, {expr_val_reg}")
-            if expr_val_reg in self._compiler_temp_pool_master and expr_val_reg != self.return_value_reg:
-                self._free_temp(expr_val_reg)
+            if expr_val_reg is None: raise Exception(f"CodeGen Error: Return expression evaluated to invalid register.")
+            if expr_val_reg != self.return_value_reg: self.emit(f"MOV {self.return_value_reg}, {expr_val_reg}")
+            if expr_val_reg in self._compiler_temp_pool_master and expr_val_reg != self.return_value_reg: self._free_temp(
+                expr_val_reg)
         self.emit(f"JMP {self.current_function_context['epilogue_label']}")
 
     def visit_FunctionCallNode(self, node):
         func_name_upper = node.name_node.name.upper()
 
-        # --- NEW: Handle mmio_write built-in ---
         if func_name_upper == "MMIO_WRITE":
-            if len(node.args_nodes) != 2:
-                raise Exception(
-                    f"CodeGen Error: mmio_write() requires exactly 2 arguments (address, value), but got {len(node.args_nodes)} on line {node.line_no}.")
-
+            if len(node.args_nodes) != 2: raise Exception(
+                f"CodeGen Error: mmio_write() requires 2 arguments, got {len(node.args_nodes)} on line {node.line_no}.")
             self.emit(f"// --- Built-in mmio_write Call (Line: {node.line_no}) ---")
-
-            # Arg 1: Address Expression -> R_addr
-            address_expr_node = node.args_nodes[0]
-            addr_reg = address_expr_node.accept(self)
-
-            # Arg 2: Value Expression -> R_val
-            value_expr_node = node.args_nodes[1]
-            value_reg = value_expr_node.accept(self)
-
-            # Emit the store instruction
+            addr_reg = node.args_nodes[0].accept(self)
+            value_reg = node.args_nodes[1].accept(self)
             self.emit(f"STORI {value_reg}, {addr_reg} // Mem[{addr_reg}] = {value_reg}")
-
-            # Free temporary registers used
-            self._free_temp(addr_reg)
+            self._free_temp(addr_reg);
             self._free_temp(value_reg)
-
-            # mmio_write does not return a value, so we return None.
             return None
-
-        # --- NEW: Handle mmio_read built-in ---
         if func_name_upper == "MMIO_READ":
-            if len(node.args_nodes) != 1:
-                raise Exception(
-                    f"CodeGen Error: mmio_read() requires exactly 1 argument (address), but got {len(node.args_nodes)} on line {node.line_no}.")
-
+            if len(node.args_nodes) != 1: raise Exception(
+                f"CodeGen Error: mmio_read() requires 1 argument, got {len(node.args_nodes)} on line {node.line_no}.")
             self.emit(f"// --- Built-in mmio_read Call (Line: {node.line_no}) ---")
-
-            # Arg 1: Address Expression -> R_addr
-            address_expr_node = node.args_nodes[0]
-            addr_reg = address_expr_node.accept(self)
-
-            # The result register will be a new temporary register
+            addr_reg = node.args_nodes[0].accept(self)
             result_reg = self._new_temp()
-
-            # Emit the load instruction
             self.emit(f"LOADI {result_reg}, {addr_reg} // {result_reg} = Mem[{addr_reg}]")
-
-            # Free the register that held the address
             self._free_temp(addr_reg)
-
-            # Return the register holding the result of the read
             return result_reg
 
-        # --- Existing logic for user-defined functions ---
         func_meta = self.function_meta_map.get(func_name_upper)
-        if not func_meta:
-            raise Exception(
-                f"CodeGen Error: Call to undefined function '{node.name_node.name}' on line {node.line_no}.")
+        if not func_meta: raise Exception(
+            f"CodeGen Error: Call to undefined function '{node.name_node.name}' on line {node.line_no}.")
 
         num_expected_params = len(func_meta['param_names'])
         num_provided_args = len(node.args_nodes)
-        if num_expected_params != num_provided_args:
-            raise Exception(
-                f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args} on line {node.line_no}.")
+        if num_expected_params != num_provided_args: raise Exception(
+            f"CodeGen Error: Function '{func_name_upper}' expects {num_expected_params} arg(s), got {num_provided_args} on line {node.line_no}.")
 
         self.emit(f"// Calling function: {node.name_node.name} ({num_provided_args} args)")
         temp_arg_regs_used = []
         for arg_expr_node in reversed(node.args_nodes):
             arg_val_reg = arg_expr_node.accept(self)
-            if arg_val_reg is None or not isinstance(arg_val_reg, str):
-                raise Exception(
-                    f"CodeGen Error: Argument for call to '{func_name_upper}' evaluated to invalid register.")
+            if arg_val_reg is None: raise Exception(
+                f"CodeGen Error: Argument for call to '{func_name_upper}' evaluated to invalid register.")
             self.emit(f"PUSH {arg_val_reg}")
             if arg_val_reg in self._compiler_temp_pool_master:
                 temp_arg_regs_used.append(arg_val_reg)
+
         for temp_reg in temp_arg_regs_used:
             self._free_temp(temp_reg)
+
         self.emit(f"CALL {func_meta['sal_label']}")
         if num_provided_args > 0:
-            self.emit(f"// Caller cleaning up {num_provided_args} argument(s)")
-            temp_dummy_for_cleanup = self._new_temp()
-            for _ in range(num_provided_args):
-                self.emit(f"POP {temp_dummy_for_cleanup}")
-            self._free_temp(temp_dummy_for_cleanup)
+            self.emit(f"// Caller cleaning up {num_provided_args} argument(s) from stack")
+            self.emit(f"MOVFRSP {self.scratch_reg_1}")
+            self.emit(f"LOAD {self.return_value_reg}, #{num_provided_args * 2}")
+            self.emit(f"ADD {self.scratch_reg_1}, {self.return_value_reg}")
+            self.emit(f"MOVTOSP {self.scratch_reg_1}")
+
         return self.return_value_reg
 
     def generic_visit(self, node):
