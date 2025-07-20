@@ -63,18 +63,14 @@ def run_toolchain_from_sal(
     if generate_mem_files:
         print("\n--- FPGA MEMORY FILE GENERATOR ---")
         try:
-            # The generate_mem_files function will print its own success/error messages.
-            # We use the program memory capacity from the main script to ensure consistency.
             generate_mem_files(
                 input_bin_file=output_binary_file,
                 memory_size=sim_program_memory_capacity,
-                memory_width=8  # Hardcoded to 8 as per the script's constraint
+                memory_width=8
             )
         except Exception as e:
-            # Catch any unexpected errors from the imported script
             print(f"FPGA GEN: An unexpected error occurred during .coe/.hex generation: {e}")
     else:
-        # This message appears if the initial import failed
         print("\n--- FPGA MEMORY FILE GENERATOR (SKIPPED) ---")
 
 
@@ -98,16 +94,15 @@ def run_toolchain_from_sal(
         traceback.print_exc()
 
     simulator = MicroprocessorSimulator(
-        data_memory_size=sim_data_memory_size,  # Use the function parameter
-        stack_size=sim_stack_size,  # Use the function parameter (simulator expects 'stack_size')
-        program_memory_capacity=sim_program_memory_capacity  # Use the function parameter
+        data_memory_size=sim_data_memory_size,
+        stack_size=sim_stack_size,
+        program_memory_capacity=sim_program_memory_capacity
     )
 
     print("\n--- SIMULATOR: Loading and Running Binary File ---")
     simulation_log = simulator.run_program(output_binary_file)
 
     try:
-        # Build the full content for the output file in the new order
         file_content_parts = [
             "--- SIMULATOR: MMIO OUTPUT ---"
         ]
@@ -117,14 +112,12 @@ def run_toolchain_from_sal(
         else:
             file_content_parts.append("// No MMIO output was generated.")
 
-        # Add a separator and the detailed simulation log
         file_content_parts.extend([
             "\n",
             "--- SIMULATOR: Simulation Log ---",
             simulation_log if simulation_log else "// No simulation log generated."
         ])
 
-        # Join all parts and write to the file
         final_file_content = "\n".join(file_content_parts) + "\n"
 
         with open(output_sim_txt_file, 'w') as f_out:
@@ -167,9 +160,6 @@ def run_full_toolchain_from_original_ssl(
             compiled_sal_string.split('\n')):
         print_toolchain_failure(source_description, "EMPTY SAL (from Original SSL)");
         return False
-
-    # print("\n--- COMPILER (simple_translator.py): Generated SAL ---") # Verbose
-    # print(compiled_sal_string) # Verbose
 
     return run_toolchain_from_sal(
         compiled_sal_string,
@@ -257,7 +247,7 @@ if __name__ == "__main__":
              "  .asm - Simple Assembly Language (direct to assembler)"
     )
     parser.add_argument(
-        "--sal-input",  # Re-added this flag for explicit control
+        "--sal-input",
         action="store_true",
         help="Force treatment of the input file as a pre-compiled SAL file (skips SSL compilation)."
     )
@@ -266,22 +256,34 @@ if __name__ == "__main__":
     source_file_to_process = args.input_file
     force_sal_input_mode = args.sal_input
 
-    base_filename = os.path.splitext(source_file_to_process)[0]
-    output_binary_file = f"{base_filename}.bin"
-    output_listing_file = f"{base_filename}.asm"
-    output_disassembled_file = f"{base_filename}_disassembled.sal"
-    output_sim_txt_file = f"{base_filename}.txt"  # New output file for simulator text
-    ply_generated_sal_intermediate_file = f"{base_filename}_from_ply.sal"
+    # -------------------------------------------------------------------
+    # --- CHANGE #1: DEFINE and CREATE the output 'build' directory ---
+    # -------------------------------------------------------------------
+    OUTPUT_DIR = "build"
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        print(f"INFO: Using output directory: '{os.path.abspath(OUTPUT_DIR)}'")
+    except OSError as e:
+        print(f"FATAL: Could not create output directory '{OUTPUT_DIR}': {e}")
+        sys.exit(1)
+    # -------------------------------------------------------------------
 
-    # Note: The 'size' argument in generate_mem_files.py corresponds to program memory.
-    # We will use this constant for both the simulator's program memory capacity and
-    # the desired size of the FPGA memory files.
-    SIM_PROGRAM_MEMORY_SIZE_BYTES = 8192  # Let's match the default from your script for now
+    # --- CHANGE #2: Update output filenames to go into the build directory ---
+    # The basename is derived from the input file, stripped of its path.
+    # e.g., input 'tests/my_test.ssl' -> basename 'my_test'
+    base_filename = os.path.splitext(os.path.basename(source_file_to_process))[0]
+
+    output_binary_file = os.path.join(OUTPUT_DIR, f"{base_filename}.bin")
+    output_listing_file = os.path.join(OUTPUT_DIR, f"{base_filename}.asm")
+    output_disassembled_file = os.path.join(OUTPUT_DIR, f"{base_filename}_disassembled.sal")
+    output_sim_txt_file = os.path.join(OUTPUT_DIR, f"{base_filename}.txt")
+    ply_generated_sal_intermediate_file = os.path.join(OUTPUT_DIR, f"{base_filename}_from_ply.sal")
+    # -------------------------------------------------------------------
+
+    # Simulator and FPGA memory file constants (unchanged)
+    SIM_PROGRAM_MEMORY_SIZE_BYTES = 8192
     SIM_DATA_MEMORY_SIZE = 8192
     SIM_STACK_SIZE_WORDS = 256
-
-    # Let's adjust the program memory size to be more realistic and match the default in your script.
-    # If you need a larger memory (like 65536), you can change this constant.
     SIM_PROG_MEM_CAPACITY_BYTES = SIM_PROGRAM_MEMORY_SIZE_BYTES
 
     if os.path.exists(source_file_to_process):
@@ -296,7 +298,6 @@ if __name__ == "__main__":
 
             success = False
             file_ext = ""
-            # Robust way to get extension, handles filenames without '.'
             if '.' in os.path.basename(source_file_to_process):
                 file_ext = source_file_to_process.lower().split('.')[-1]
 
@@ -306,7 +307,7 @@ if __name__ == "__main__":
                 if force_sal_input_mode and not is_sal_file_type_by_extension:
                     print(
                         f"Info: --sal-input flag used, treating '{source_file_to_process}' as SAL despite extension '{file_ext}'.")
-                elif is_sal_file_type_by_extension and not force_sal_input_mode:  # Auto-detected
+                elif is_sal_file_type_by_extension and not force_sal_input_mode:
                     print(f"Info: Detected SAL/ASM extension, treating '{source_file_to_process}' as SAL input.")
 
                 success = run_toolchain_from_sal(
