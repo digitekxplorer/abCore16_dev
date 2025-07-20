@@ -1,4 +1,4 @@
-# c_ply_compiler.py
+# c_ply_compiler.py (with all bitwise operators)
 
 import os
 import sys
@@ -17,6 +17,10 @@ from ast_nodes import (
 )
 
 # --- Tokenizer (Lexer) Definition ---
+
+# -----------------
+# --- CHANGE #1: Add new token names ---
+# -----------------
 tokens = (
     'NUMBER', 'IDENTIFIER',
     'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
@@ -24,9 +28,11 @@ tokens = (
     'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA', 'COLON',
     'EQ', 'NEQ', 'LE', 'GE', 'LT', 'GT',
     'AND_LOGICAL', 'OR_LOGICAL', 'NOT_LOGICAL',
+    # New Bitwise Tokens
+    'BITWISE_OR', 'BITWISE_XOR', 'BITWISE_NOT', # <-- ADDED THIS LINE
     'PRINT', 'IF', 'ELSE', 'WHILE', 'FOR',
     'FUNC', 'RETURN', 'VAR',
-    'SWITCH', 'CASE', 'DEFAULT', 'BREAK' # <-- ADDED THIS LINE
+    'SWITCH', 'CASE', 'DEFAULT', 'BREAK'
 )
 
 t_ignore = ' \t'
@@ -35,7 +41,7 @@ t_NEQ = r'!='
 t_LE = r'<='
 t_GE = r'>='
 t_AND_LOGICAL = r'&&'
-t_OR_LOGICAL = r'\|\|'
+t_OR_LOGICAL = r'\|\|' # Note: the single pipe for BITWISE_OR must come first
 t_LT = r'<'
 t_GT = r'>'
 t_ASSIGN = r'='
@@ -44,7 +50,6 @@ t_PLUSPLUS = r'\+\+'
 t_MINUSMINUS = r'--'
 t_PLUS = r'\+'
 t_MINUS = r'-'
-# t_TIMES is removed. STAR will handle multiplication and dereference.
 t_SEMI = r';'
 t_LPAREN = r'\('
 t_RPAREN = r'\)'
@@ -55,14 +60,20 @@ t_RBRACKET = r'\]'
 t_COMMA = r','
 t_COLON = r':'
 t_AMPERSAND = r'&'
-t_STAR = r'\*' # This now serves for both multiplication and dereferencing
+t_STAR = r'\*'
+
+# -----------------
+# --- CHANGE #2: Add new token rules ---
+# -----------------
+t_BITWISE_OR = r'\|'   # <-- ADDED THIS LINE
+t_BITWISE_XOR = r'\^'  # <-- ADDED THIS LINE
+t_BITWISE_NOT = r'~'  # <-- ADDED THIS LINE
 
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
     'func': 'FUNC', 'return': 'RETURN', 'var': 'VAR',
     'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
 }
-
 
 def t_IDENTIFIER(t):
     r'[a-zA-Z_][a-zA-Z_0-9]*'
@@ -81,117 +92,95 @@ def t_NUMBER(t):
         t.value = 0
     return t
 
-
 def t_newline(t):
     r'\n+'
     t.lexer.lineno += len(t.value)
-
 
 def t_COMMENT(t):
     r'//.*'
     pass
 
-
 def t_error(t):
     print(f"PLY Lexer: Illegal char '{t.value[0]}' line {t.lexer.lineno} offset {t.lexpos}")
     t.lexer.skip(1)
 
-
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
+
+# -----------------
+# --- CHANGE #3: Update operator precedence table ---
+# -----------------
 precedence = (
-    ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'),
+    ('left', 'OR_LOGICAL'),
+    ('left', 'AND_LOGICAL'),
+    ('left', 'BITWISE_OR'),   # <-- ADDED THIS LINE
+    ('left', 'BITWISE_XOR'),  # <-- ADDED THIS LINE
+    ('left', 'AMPERSAND'),    # This is bitwise AND
     ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
     ('left', 'PLUS', 'MINUS'),
     ('left', 'STAR'),
-    ('right', 'NOT_LOGICAL', 'UMINUS', 'UNARY_PTR'),
+    # Note: BITWISE_NOT has the same precedence as other right-associative unary ops
+    ('right', 'NOT_LOGICAL', 'BITWISE_NOT', 'UMINUS', 'UNARY_PTR'), # <-- MODIFIED THIS LINE
     ('left', 'PLUSPLUS', 'MINUSMINUS'),
-    # Add new precedence rules for if/else ambiguity
     ('right', 'IFX'),
     ('right', 'ELSE')
 )
 start = 'program'
 
-
+# --- (p_program to p_break_statement are unchanged) ---
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
-
-
 def p_top_level_declaration_list(p):
     '''top_level_declaration_list : top_level_declaration_list top_level_declaration
                                   | empty'''
     if len(p) == 3:
-        lst = p[1] if p[1] is not None else []
+        lst = p[1] if p[1] is not None else [];
         if p[2] is not None: lst.append(p[2])
         p[0] = lst
-    else:
-        p[0] = []
-
-
+    else: p[0] = []
 def p_top_level_declaration(p):
     '''top_level_declaration : function_definition
                              | variable_declaration_statement
                              | statement_for_global_scope'''
     p[0] = p[1]
-
-
 def p_statement_for_global_scope(p):
     '''statement_for_global_scope : assignment_statement
                                   | print_statement
                                   | expression_statement
                                   | empty_statement'''
     p[0] = p[1]
-
-
 def p_variable_declaration_statement(p):
     '''variable_declaration_statement : VAR IDENTIFIER SEMI
                                       | VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
                                       | VAR IDENTIFIER ASSIGN expression SEMI'''
     if len(p) == 7:
         size = p[4]
-        if not isinstance(size, int) or size <= 0:
-            print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
+        if not isinstance(size, int) or size <= 0: print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
         p[0] = ArrayDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
-    elif len(p) == 6:
-        p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-    elif len(p) == 4:
-        p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
-
-
+    elif len(p) == 6: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+    elif len(p) == 4: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
 def p_function_definition(p):
     '''function_definition : FUNC IDENTIFIER LPAREN parameter_list_opt RPAREN block_statement'''
     p[0] = FunctionDefinitionNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], p[6], line_no=p.lineno(1))
-
-
 def p_parameter_list_opt(p):
     '''parameter_list_opt : parameter_list
                           | empty'''
     p[0] = p[1] if p[1] is not None else []
-
-
 def p_parameter_list(p):
     '''parameter_list : IDENTIFIER
                       | parameter_list COMMA IDENTIFIER'''
-    if len(p) == 2:
-        p[0] = [IdentifierNode(p[1], line_no=p.lineno(1))]
-    else:
-        p[1].append(IdentifierNode(p[3], line_no=p.lineno(3)));
-        p[0] = p[1]
-
-
+    if len(p) == 2: p[0] = [IdentifierNode(p[1], line_no=p.lineno(1))]
+    else: p[1].append(IdentifierNode(p[3], line_no=p.lineno(3))); p[0] = p[1]
 def p_statement_list(p):
     '''statement_list : statement_list statement
                       | empty'''
     if len(p) == 3:
-        lst = p[1] if p[1] is not None else []
+        lst = p[1] if p[1] is not None else [];
         if p[2] is not None: lst.append(p[2])
         p[0] = lst
-    else:
-        p[0] = []
-
-
+    else: p[0] = []
 def p_statement(p):
     '''statement : assignment_statement
                  | print_statement
@@ -206,181 +195,106 @@ def p_statement(p):
                  | switch_statement
                  | break_statement'''
     p[0] = p[1]
-
-
 def p_expression_statement(p):
     '''expression_statement : expression SEMI'''
     p[0] = ExpressionStatementNode(p[1], line_no=p.slice[1].lineno if hasattr(p.slice[1], 'lineno') else p.lineno(1))
-
-
 def p_block_statement(p):
     '''block_statement : LBRACE statement_list RBRACE'''
     p[0] = ProgramNode(p[2] if p[2] is not None else [], line_no=p.lineno(1))
-
-
 def p_return_statement(p):
     '''return_statement : RETURN expression SEMI
                         | RETURN SEMI'''
     p[0] = ReturnNode(p[2] if len(p) == 4 else None, line_no=p.lineno(1))
-
-
 def p_empty_statement(p):
     '''empty_statement : SEMI'''
     p[0] = None
-
-# FIX: Add rule for assignment to a dereferenced pointer
 def p_assignment_statement(p):
     '''assignment_statement : IDENTIFIER ASSIGN expression SEMI
                             | array_access ASSIGN expression SEMI
                             | STAR expression ASSIGN expression SEMI'''
-    if p.slice[1].type == 'STAR': # Handle *p = ...
+    if p.slice[1].type == 'STAR':
         target_node = UnaryOpNode('*', p[2], line_no=p.lineno(1))
         p[0] = AssignmentNode(target_node, p[4], line_no=p.lineno(3))
-    elif isinstance(p[1], str):  # This is the IDENTIFIER ASSIGN ... rule
-        p[0] = AssignmentNode(
-            target_name=IdentifierNode(p[1], line_no=p.lineno(1)),
-            value_expr=p[3],
-            line_no=p.lineno(2)
-        )
-    else:  # This is the array_access ASSIGN ... rule
-        p[0] = AssignmentNode(
-            target_name=p[1],
-            value_expr=p[3],
-            line_no=p.lineno(2)
-        )
-
-
+    elif isinstance(p[1], str):
+        p[0] = AssignmentNode(target_name=IdentifierNode(p[1], line_no=p.lineno(1)), value_expr=p[3], line_no=p.lineno(2))
+    else:
+        p[0] = AssignmentNode(target_name=p[1], value_expr=p[3], line_no=p.lineno(2))
 def p_print_statement(p):
     '''print_statement : PRINT expression SEMI'''
     p[0] = PrintNode(p[2], line_no=p.lineno(1))
-
-
 def p_if_statement(p):
     '''if_statement : IF LPAREN expression RPAREN statement %prec IFX
                     | IF LPAREN expression RPAREN statement ELSE statement'''
-    if len(p) == 6:
-        # This rule handles an 'if' without an 'else'
-        p[0] = IfNode(condition=p[3], true_block=p[5], false_block=None, line_no=p.lineno(1))
-    else:
-        # This rule handles both 'if-else' and 'if-else if' constructs
-        p[0] = IfNode(condition=p[3], true_block=p[5], false_block=p[7], line_no=p.lineno(1))
-
-
+    if len(p) == 6: p[0] = IfNode(condition=p[3], true_block=p[5], false_block=None, line_no=p.lineno(1))
+    else: p[0] = IfNode(condition=p[3], true_block=p[5], false_block=p[7], line_no=p.lineno(1))
 def p_while_statement(p):
     '''while_statement : WHILE LPAREN expression RPAREN block_statement'''
     p[0] = WhileNode(p[3], p[5], line_no=p.lineno(1))
-
-
 def p_for_initializer(p):
     '''for_initializer : VAR IDENTIFIER ASSIGN expression
                        | VAR IDENTIFIER
                        | IDENTIFIER ASSIGN expression
-                       | expression
-    '''
+                       | expression'''
     if p.slice[1].type == 'VAR':
-        if len(p) == 5:
-            p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-        else:
-            p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
-    elif len(p) == 4 and p.slice[2].type == 'ASSIGN':
-        p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
-    elif len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = None
-
-
+        if len(p) == 5: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+        else: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+    elif len(p) == 4 and p.slice[2].type == 'ASSIGN': p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
+    elif len(p) == 2: p[0] = p[1]
+    else: p[0] = None
 def p_for_initializer_opt(p):
     '''for_initializer_opt : for_initializer
                            | empty'''
     p[0] = p[1]
-
-
 def p_for_cond_update_item(p):
     '''for_cond_update_item : IDENTIFIER ASSIGN expression
-                            | expression
-    '''
-    if len(p) == 4 and p.slice[2].type == 'ASSIGN':
-        p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
-    elif len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = None
-
-
+                            | expression'''
+    if len(p) == 4 and p.slice[2].type == 'ASSIGN': p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
+    elif len(p) == 2: p[0] = p[1]
+    else: p[0] = None
 def p_for_cond_update_opt(p):
     '''for_cond_update_opt : for_cond_update_item
                            | empty'''
     p[0] = p[1]
-
-
 def p_for_statement(p):
     '''for_statement : FOR LPAREN for_initializer_opt SEMI for_cond_update_opt SEMI for_cond_update_opt RPAREN block_statement'''
-    init_content = p[3]
-    cond_content = p[5]
-    update_content = p[7]
-    body_node = p[9]
-    init_node_for_fornode = None
+    init_content=p[3]; cond_content=p[5]; update_content=p[7]; body_node=p[9]; init_node_for_fornode=None
     if init_content is not None:
-        if isinstance(init_content, VarDeclNode):
-            init_node_for_fornode = init_content
-        elif isinstance(init_content, (ExpressionNode, AssignmentNode)):
-            line_num = init_content.line_no if hasattr(init_content,'line_no') and init_content.line_no is not None else p.lineno(1)
-            init_node_for_fornode = ExpressionStatementNode(init_content, line_no=line_num)
-        else:
-            init_node_for_fornode = None
-    condition_expr_node = cond_content
-    update_stmt_node = None
+        if isinstance(init_content,VarDeclNode): init_node_for_fornode=init_content
+        elif isinstance(init_content,(ExpressionNode,AssignmentNode)):
+            line_num=init_content.line_no if hasattr(init_content,'line_no') and init_content.line_no is not None else p.lineno(1)
+            init_node_for_fornode=ExpressionStatementNode(init_content,line_no=line_num)
+    condition_expr_node=cond_content; update_stmt_node=None
     if update_content is not None:
-        if isinstance(update_content, (ExpressionNode, AssignmentNode)):
-            line_num = update_content.line_no if hasattr(update_content,'line_no') and update_content.line_no is not None else p.lineno(1)
-            update_stmt_node = ExpressionStatementNode(update_content, line_no=line_num)
-        else:
-            update_stmt_node = None
-    p[0] = ForNode(init_node_for_fornode, condition_expr_node, update_stmt_node, body_node, line_no=p.lineno(1))
-
+        if isinstance(update_content,(ExpressionNode,AssignmentNode)):
+            line_num=update_content.line_no if hasattr(update_content,'line_no') and update_content.line_no is not None else p.lineno(1)
+            update_stmt_node=ExpressionStatementNode(update_content,line_no=line_num)
+    p[0]=ForNode(init_node_for_fornode,condition_expr_node,update_stmt_node,body_node,line_no=p.lineno(1))
 def p_switch_statement(p):
     '''switch_statement : SWITCH LPAREN expression RPAREN LBRACE case_list RBRACE'''
     p[0] = SwitchNode(condition=p[3], cases=p[6], line_no=p.lineno(1))
-
-
 def p_case_list(p):
     '''case_list : case_list case_block
                  | empty'''
     if len(p) == 3:
-        lst = p[1] if p[1] is not None else []
-        if p[2] is not None:
-            lst.append(p[2])
+        lst = p[1] if p[1] is not None else [];
+        if p[2] is not None: lst.append(p[2])
         p[0] = lst
-    else:
-        p[0] = []
-
-
+    else: p[0] = []
 def p_case_block(p):
     '''case_block : case_label statement_list'''
-    # The case_label (p[1]) is a tuple: (value_node, line_number)
-    value_node, line_num = p[1]
-    p[0] = CaseNode(value_expr=value_node, statements=p[2], line_no=line_num)
-
-
+    value_node, line_num = p[1]; p[0] = CaseNode(value_expr=value_node, statements=p[2], line_no=line_num)
 def p_case_label(p):
     '''case_label : CASE NUMBER COLON
                   | DEFAULT COLON'''
-    if len(p) == 4:
-        # 'case NUMBER:'
-        # We need to create a NumberNode for the constant value
-        value_node = NumberNode(p[2], line_no=p.lineno(2))
-        p[0] = (value_node, p.lineno(1))
-    else:
-        # 'default:'
-        p[0] = (None, p.lineno(1))
-
-
+    if len(p) == 4: value_node = NumberNode(p[2], line_no=p.lineno(2)); p[0] = (value_node, p.lineno(1))
+    else: p[0] = (None, p.lineno(1))
 def p_break_statement(p):
     '''break_statement : BREAK SEMI'''
     p[0] = BreakNode()
 
-
+# -----------------
+# --- CHANGE #4: Add new grammar rules and update expression hierarchy ---
+# -----------------
 def p_expression(p):
     '''expression : expression OR_LOGICAL expression_and
                   | expression_and'''
@@ -389,15 +303,37 @@ def p_expression(p):
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-
 def p_expression_and(p):
-    '''expression_and : expression_and AND_LOGICAL expression_equality
-                      | expression_equality'''
+    '''expression_and : expression_and AND_LOGICAL expression_bitwise_or
+                      | expression_bitwise_or''' # MODIFIED
     if len(p) == 2:
         p[0] = p[1]
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
+def p_expression_bitwise_or(p): # NEW
+    '''expression_bitwise_or : expression_bitwise_or BITWISE_OR expression_bitwise_xor
+                             | expression_bitwise_xor'''
+    if len(p) == 2:
+        p[0] = p[1]
+    else:
+        p[0] = BinaryOpNode('|', p[1], p[3], line_no=p.slice[2].lineno)
+
+def p_expression_bitwise_xor(p): # NEW
+    '''expression_bitwise_xor : expression_bitwise_xor BITWISE_XOR expression_bitwise_and
+                              | expression_bitwise_and'''
+    if len(p) == 2:
+        p[0] = p[1]
+    else:
+        p[0] = BinaryOpNode('^', p[1], p[3], line_no=p.slice[2].lineno)
+
+def p_expression_bitwise_and(p):
+    '''expression_bitwise_and : expression_bitwise_and AMPERSAND expression_equality
+                              | expression_equality'''
+    if len(p) == 2:
+        p[0] = p[1]
+    else:
+        p[0] = BinaryOpNode('&', p[1], p[3], line_no=p.slice[2].lineno)
 
 def p_expression_equality(p):
     '''expression_equality : expression_equality EQ expression_comparison
@@ -407,7 +343,6 @@ def p_expression_equality(p):
         p[0] = p[1]
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
 
 def p_expression_comparison(p):
     '''expression_comparison : expression_comparison LT expression_additive
@@ -420,7 +355,6 @@ def p_expression_comparison(p):
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-
 def p_expression_additive(p):
     '''expression_additive : expression_additive PLUS expression_multiplicative
                            | expression_additive MINUS expression_multiplicative
@@ -430,7 +364,6 @@ def p_expression_additive(p):
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-# FIX: Use STAR for multiplication
 def p_expression_multiplicative(p):
     '''expression_multiplicative : expression_multiplicative STAR expression_unary
                                  | expression_unary'''
@@ -439,173 +372,107 @@ def p_expression_multiplicative(p):
     else:
         p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 
-# FIX: Add rules for unary pointer operators
 def p_expression_unary(p):
     '''expression_unary : NOT_LOGICAL expression_unary
                         | MINUS expression_unary %prec UMINUS
                         | AMPERSAND expression_unary %prec UNARY_PTR
                         | STAR expression_unary %prec UNARY_PTR
-                        | postfix_expression''' # <-- CHANGED
+                        | BITWISE_NOT expression_unary
+                        | postfix_expression''' # MODIFIED
     if len(p) == 2:
         p[0] = p[1]
     else:
-        # Using a generic UnaryOpNode for all unary operators
-        p[0] = UnaryOpNode(p[1], p[2], line_no=p.slice[1].lineno)
+        # For bitwise not, we create a UnaryOpNode with '~'
+        op_symbol = '~' if p.slice[1].type == 'BITWISE_NOT' else p[1]
+        p[0] = UnaryOpNode(op_symbol, p[2], line_no=p.slice[1].lineno)
 
+# --- (The rest of the file is unchanged) ---
 def p_postfix_expression(p):
     '''postfix_expression : primary_expression
                           | postfix_expression PLUSPLUS
                           | postfix_expression MINUSMINUS'''
-    if len(p) == 2:
-        p[0] = p[1] # It's just a primary_expression
-    else:
-        # It's an increment/decrement operation
-        p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
 def p_primary_expression(p):
     '''primary_expression : NUMBER
                           | IDENTIFIER
                           | LPAREN expression RPAREN
                           | function_call_actual
                           | array_access'''
-    if p.slice[1].type == 'NUMBER':
-        p[0] = NumberNode(p[1], line_no=p.lineno(1))
-    elif p.slice[1].type == 'IDENTIFIER':
-        p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
-    elif p.slice[1].type == 'LPAREN':
-        p[0] = p[2]
-    else:
-        p[0] = p[1]
-
-
+    if p.slice[1].type == 'NUMBER': p[0] = NumberNode(p[1], line_no=p.lineno(1))
+    elif p.slice[1].type == 'IDENTIFIER': p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
+    elif p.slice[1].type == 'LPAREN': p[0] = p[2]
+    else: p[0] = p[1]
 def p_array_access(p):
     '''array_access : IDENTIFIER LBRACKET expression RBRACKET'''
-    p[0] = ArrayAccessNode(
-        name_node=IdentifierNode(p[1], line_no=p.lineno(1)),
-        index_expr_node=p[3],
-        line_no=p.lineno(1)
-    )
-
-
+    p[0] = ArrayAccessNode(name_node=IdentifierNode(p[1], line_no=p.lineno(1)), index_expr_node=p[3], line_no=p.lineno(1))
 def p_function_call_actual(p):
     '''function_call_actual : IDENTIFIER LPAREN argument_list_opt RPAREN'''
     p[0] = FunctionCallNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
-
-
 def p_argument_list_opt(p):
     '''argument_list_opt : argument_list
                          | empty'''
     p[0] = p[1] if p[1] is not None else []
-
-
 def p_argument_list(p):
     '''argument_list : expression
                      | argument_list COMMA expression'''
-    if len(p) == 2:
-        p[0] = [p[1]]
-    else:
-        p[1].append(p[3]);
-        p[0] = p[1]
-
-
+    if len(p) == 2: p[0] = [p[1]]
+    else: p[1].append(p[3]); p[0] = p[1]
 def p_empty(p):
     '''empty :'''
     p[0] = None
-
-
 _ply_parser_errors_found = False
-
-
 def p_error(p):
-    global _ply_parser_errors_found;
-    _ply_parser_errors_found = True
-    if p:
-        print(f"PLY Parser: Error token '{p.type}' ('{p.value}') line {p.lineno} pos {p.lexpos}")
-    else:
-        print(f"PLY Parser: Syntax error at EOF.")
-
-
+    global _ply_parser_errors_found; _ply_parser_errors_found = True
+    if p: print(f"PLY Parser: Error token '{p.type}' ('{p.value}') line {p.lineno} pos {p.lexpos}")
+    else: print(f"PLY Parser: Syntax error at EOF.")
 parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
-
 from code_generator import SALCodeGenerator
-
 def compile_c_ssl_string_to_sal(c_ssl_code_string):
     global _ply_parser_errors_found
-    _ply_parser_errors_found = False
-    lexer_ply.lineno = 1
-
+    _ply_parser_errors_found = False; lexer_ply.lineno = 1
     ast = parser_ply.parse(input=c_ssl_code_string, lexer=lexer_ply, tracking=True, debug=False)
-
     if _ply_parser_errors_found or not ast:
-        if not ast and c_ssl_code_string.strip() and not _ply_parser_errors_found:
-            print("C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported by p_error. Check grammar or yacc debug output.")
-        elif not ast and not c_ssl_code_string.strip():
-            print("C-SSL Info: Input empty or comments only.");
-            return "// No effective input", False
-        elif _ply_parser_errors_found:
-            print("C-SSL Parsing FAILED due to syntax errors reported by p_error.")
-        else:
-            print("C-SSL Parsing FAILED: Unknown reason, no AST, no p_error. Check yacc debug output if enabled.")
+        if not ast and c_ssl_code_string.strip() and not _ply_parser_errors_found: print("C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported. Check grammar or yacc debug output.")
+        elif not ast and not c_ssl_code_string.strip(): print("C-SSL Info: Input empty or comments only."); return "// No effective input", False
+        elif _ply_parser_errors_found: print("C-SSL Parsing FAILED due to syntax errors reported by p_error.")
+        else: print("C-SSL Parsing FAILED: Unknown reason, no AST, no p_error. Check yacc debug output if enabled.")
         return None, True
-
     code_gen = SALCodeGenerator()
-    generated_sal_code = ""
-    code_gen_had_errors = False
-    try:
-        generated_sal_code = code_gen.generate(ast)
+    generated_sal_code = ""; code_gen_had_errors = False
+    try: generated_sal_code = code_gen.generate(ast)
     except Exception as e:
-        print(f"FATAL C-SSL CodeGen Error: {e}")
-        import traceback
-        traceback.print_exc()
-        code_gen_had_errors = True
-
-    if code_gen_had_errors or (
-            ast and not generated_sal_code.strip() and hasattr(ast, 'statements') and ast.statements):
-        if not generated_sal_code.strip() and not code_gen_had_errors and hasattr(ast, 'statements') and ast.statements:
-            print("C-SSL Compilation generated empty SAL code from non-empty AST without explicit codegen errors.")
-        else:
-            print("C-SSL Compilation FAILED during code generation.")
+        print(f"FATAL C-SSL CodeGen Error: {e}"); import traceback; traceback.print_exc(); code_gen_had_errors = True
+    if code_gen_had_errors or (ast and not generated_sal_code.strip() and hasattr(ast, 'statements') and ast.statements):
+        if not generated_sal_code.strip() and not code_gen_had_errors and hasattr(ast, 'statements') and ast.statements: print("C-SSL Compilation generated empty SAL code from non-empty AST without explicit codegen errors.")
+        else: print("C-SSL Compilation FAILED during code generation.")
         return None, True
-
     return generated_sal_code, False
 
-
 if __name__ == '__main__':
-    # Simple test to ensure the new syntax doesn't break existing multiplication
-    test_ssl_mult_and_pointers = """
+    # A simple test to run directly, now it can check the new syntax
+    test_bitwise_ops = """
     func main() {
-        var x;
-        x = 5 * 10; // Test multiplication
-        print x;
+        var a; a = 12; // 1100
+        var b; b = 10; // 1010
 
-        var p;
-        var y;
-        y = 42;
-        p = &y;     // Test address-of
-        print *p;   // Test dereference
-        *p = 100;   // Test assignment to dereference
-        print y;
+        print a | b; // OR -> 1110 -> 14
+        print a ^ b; // XOR -> 0110 -> 6
+        print ~a;    // NOT -> ...1111 0011 (Depends on 16-bit interpretation)
     }
     """
-    ssl_input_file_path = "test_ptr_syntax_direct.ssl"
-    sal_output_file_path = "SAL_from_c_ply_ptr_syntax_direct.sal"
-
+    ssl_file = "test_bitwise_direct.ssl"
     try:
-        with open(ssl_input_file_path, 'w') as f:
-            f.write(test_ssl_mult_and_pointers)
-        print(f"Test SSL content written to '{ssl_input_file_path}'")
+        with open(ssl_file, 'w') as f: f.write(test_bitwise_ops)
+        print(f"Test SSL written to '{ssl_file}'")
     except Exception as e:
-        print(f"Error creating test file '{ssl_input_file_path}': {e}.")
+        print(f"Error creating test file '{ssl_file}': {e}.")
         sys.exit(1)
-
-    print(f"\n--- Running c_ply_compiler.py (Pointer Syntax Test) directly from '{ssl_input_file_path}' ---")
-    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_ssl_mult_and_pointers)
-
+    print(f"\n--- Running c_ply_compiler.py directly ---")
+    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_bitwise_ops)
     if had_errors or generated_sal is None:
-        print("\nC-SSL COMPILATION FAILED (Pointer Syntax Test - Direct Run).")
+        print("\nC-SSL COMPILATION FAILED.")
     else:
-        print("\nC-SSL COMPILATION SUCCESSFUL (Pointer Syntax Test - Direct Run).")
-        # For a direct run, we just check if it compiles without error.
-        # The generated SAL might be garbage until Phase 2 is done.
-        print("\n--- Generated SAL (might be incorrect until Phase 2) ---")
+        print("\nC-SSL PARSING SUCCESSFUL (Code gen might be incorrect until Phase 2).")
+        print("\n--- Generated SAL ---")
         print(generated_sal)
