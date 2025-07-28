@@ -1,11 +1,6 @@
 # main.py
-# June 2, 2025
-# Use to run
-# python main.py --sal-input SAL_code_gen.sal
-# or from C-like file
-# python main.py test_program.ssl
-# or extensive core16-C testing
-# python main.py test_c_like_features.ssl
+# July 28, 2025
+# Updated for file-based preprocessor with #include support.
 
 import os
 import traceback
@@ -17,6 +12,7 @@ from simple_translator import SimpleTranslator
 from simple_assembler import SimpleAssembler
 from simple_disassembler import SimpleDisassembler
 from microprocessor_simulator import MicroprocessorSimulator
+from preprocessor import Preprocessor
 
 # Import the C-like SSL (PLY-based) compiler function
 try:
@@ -171,7 +167,7 @@ def run_full_toolchain_from_original_ssl(
 
 
 def run_full_toolchain_from_c_ssl(
-        c_ssl_code_string,
+        source_ssl_filepath,  # Now accepts a filepath
         source_description="C-like SSL (.ssl) Code",
         output_ply_sal_file="program_ply_generated.sal",
         output_binary_file="program.bin",
@@ -185,9 +181,36 @@ def run_full_toolchain_from_c_ssl(
     print(
         f"==============================================\n  STARTING C-LIKE SSL (.ssl) TOOLCHAIN FOR: {source_description}  \n==============================================")
 
+    # --- PREPROCESSOR STEP ---
+    print("\n--- PREPROCESSOR: Processing source file and #includes ---")
+    preproc = Preprocessor()
+    # Process the main source file path. The preprocessor handles the rest.
+    preprocessed_code, preprocess_had_errors = preproc.process(source_ssl_filepath)
+
+    if preprocess_had_errors:
+        print("PREPROCESSOR: Encountered errors:")
+        for err in preproc.errors:
+            print(f"  - {err}")
+        print_toolchain_failure(source_description, "PREPROCESSING")
+        return False
+
+    # Save preprocessed output for debugging
+    try:
+        # Construct path for the intermediate file (e.g., 'build/my_test.i')
+        base_name_for_outputs = os.path.splitext(os.path.basename(output_binary_file))[0]
+        preprocessed_filename = os.path.join(os.path.dirname(output_binary_file), f"{base_name_for_outputs}.i")
+        with open(preprocessed_filename, 'w') as f:
+            f.write(preprocessed_code)
+        print(f"PREPROCESSOR: Preprocessed code saved to '{preprocessed_filename}'")
+    except IOError as e:
+        print(f"PREPROCESSOR: Warning - Could not write preprocessed file: {e}")
+    # --- END OF PREPROCESSOR STEP ---
+
+
     print("\n--- COMPILER (PLY-based via c_ply_compiler.py): Compiling C-like SSL ---")
 
-    generated_sal_string, ply_compilation_had_errors = compile_c_ssl_string_to_sal(c_ssl_code_string)
+    # Use the preprocessed code from now on
+    generated_sal_string, ply_compilation_had_errors = compile_c_ssl_string_to_sal(preprocessed_code)
 
     if ply_compilation_had_errors or generated_sal_string is None:
         print_toolchain_failure(source_description, "COMPILATION (C-like SSL with PLY)");
@@ -257,7 +280,7 @@ if __name__ == "__main__":
     force_sal_input_mode = args.sal_input
 
     # -------------------------------------------------------------------
-    # --- CHANGE #1: DEFINE and CREATE the output 'build' directory ---
+    # --- DEFINE and CREATE the output 'build' directory ---
     # -------------------------------------------------------------------
     OUTPUT_DIR = "build"
     try:
@@ -268,9 +291,7 @@ if __name__ == "__main__":
         sys.exit(1)
     # -------------------------------------------------------------------
 
-    # --- CHANGE #2: Update output filenames to go into the build directory ---
-    # The basename is derived from the input file, stripped of its path.
-    # e.g., input 'tests/my_test.ssl' -> basename 'my_test'
+    # --- Update output filenames to go into the build directory ---
     base_filename = os.path.splitext(os.path.basename(source_file_to_process))[0]
 
     output_binary_file = os.path.join(OUTPUT_DIR, f"{base_filename}.bin")
@@ -280,7 +301,7 @@ if __name__ == "__main__":
     ply_generated_sal_intermediate_file = os.path.join(OUTPUT_DIR, f"{base_filename}_from_ply.sal")
     # -------------------------------------------------------------------
 
-    # Simulator and FPGA memory file constants (unchanged)
+    # Simulator and FPGA memory file constants
     SIM_PROGRAM_MEMORY_SIZE_BYTES = 8192
     SIM_DATA_MEMORY_SIZE = 8192
     SIM_STACK_SIZE_WORDS = 256
@@ -289,6 +310,7 @@ if __name__ == "__main__":
     if os.path.exists(source_file_to_process):
         print(f"Found source file: {source_file_to_process}")
         try:
+            # We still need to read the content for the non-C-SSL paths
             with open(source_file_to_process, 'r') as f:
                 file_content = f.read()
 
@@ -334,8 +356,9 @@ if __name__ == "__main__":
                     sim_program_memory_capacity=SIM_PROG_MEM_CAPACITY_BYTES
                 )
             elif file_ext == "ssl":
+                # For C-like SSL, we now pass the filepath directly
                 success = run_full_toolchain_from_c_ssl(
-                    file_content,
+                    source_file_to_process, # Pass the filepath
                     source_description=f"C-like SSL File '{source_file_to_process}'",
                     output_ply_sal_file=ply_generated_sal_intermediate_file,
                     output_binary_file=output_binary_file,
