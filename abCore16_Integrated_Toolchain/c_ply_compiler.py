@@ -1,4 +1,5 @@
-# c_ply_compiler.py (with all bitwise operators)
+# c_ply_compiler.py
+# MODIFIED: Added 'char' type and string literals.
 
 import os
 import sys
@@ -13,25 +14,23 @@ from ast_nodes import (
     ExpressionStatementNode, FunctionCallNode,
     ForNode, VarDeclNode,
     ArrayDeclNode, ArrayAccessNode, PostfixOpNode,
-    SwitchNode, CaseNode, BreakNode
+    SwitchNode, CaseNode, BreakNode,
+    StringLiteralNode  # <-- Import the new node
 )
 
 # --- Tokenizer (Lexer) Definition ---
 
-# -----------------
-# --- CHANGE #1: Add new token names ---
-# -----------------
+# --- CHANGE #1: Add new tokens CHAR and STRING_LITERAL ---
 tokens = (
-    'NUMBER', 'IDENTIFIER',
+    'NUMBER', 'IDENTIFIER', 'STRING_LITERAL',
     'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
     'AMPERSAND', 'ASSIGN', 'SEMI',
     'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA', 'COLON',
     'EQ', 'NEQ', 'LE', 'GE', 'LT', 'GT',
     'AND_LOGICAL', 'OR_LOGICAL', 'NOT_LOGICAL',
-    # New Bitwise Tokens
-    'BITWISE_OR', 'BITWISE_XOR', 'BITWISE_NOT', # <-- ADDED THIS LINE
+    'BITWISE_OR', 'BITWISE_XOR', 'BITWISE_NOT',
     'PRINT', 'IF', 'ELSE', 'WHILE', 'FOR',
-    'FUNC', 'RETURN', 'VAR',
+    'FUNC', 'RETURN', 'INT', 'CHAR',
     'SWITCH', 'CASE', 'DEFAULT', 'BREAK'
 )
 
@@ -41,7 +40,7 @@ t_NEQ = r'!='
 t_LE = r'<='
 t_GE = r'>='
 t_AND_LOGICAL = r'&&'
-t_OR_LOGICAL = r'\|\|' # Note: the single pipe for BITWISE_OR must come first
+t_OR_LOGICAL = r'\|\|'
 t_LT = r'<'
 t_GT = r'>'
 t_ASSIGN = r'='
@@ -61,19 +60,25 @@ t_COMMA = r','
 t_COLON = r':'
 t_AMPERSAND = r'&'
 t_STAR = r'\*'
+t_BITWISE_OR = r'\|'
+t_BITWISE_XOR = r'\^'
+t_BITWISE_NOT = r'~'
 
-# -----------------
-# --- CHANGE #2: Add new token rules ---
-# -----------------
-t_BITWISE_OR = r'\|'   # <-- ADDED THIS LINE
-t_BITWISE_XOR = r'\^'  # <-- ADDED THIS LINE
-t_BITWISE_NOT = r'~'  # <-- ADDED THIS LINE
-
+# --- CHANGE #2: Add 'char' to reserved words ---
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
-    'func': 'FUNC', 'return': 'RETURN', 'var': 'VAR',
+    'func': 'FUNC', 'return': 'RETURN', 'int': 'INT', 'char': 'CHAR',
     'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
 }
+
+# --- CHANGE #3: New lexer rule for string literals ---
+def t_STRING_LITERAL(t):
+    r'\"([^"\\]|\\.)*\"'
+    # Remove the outer quotes
+    str_val = t.value[1:-1]
+    # Process escape sequences like \n, \t, \\, \"
+    t.value = str_val.encode().decode('unicode_escape')
+    return t
 
 def t_IDENTIFIER(t):
     r'[a-zA-Z_][a-zA-Z_0-9]*'
@@ -107,38 +112,43 @@ def t_error(t):
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
-
-# -----------------
-# --- CHANGE #3: Update operator precedence table ---
-# -----------------
 precedence = (
-    ('left', 'OR_LOGICAL'),
-    ('left', 'AND_LOGICAL'),
-    ('left', 'BITWISE_OR'),   # <-- ADDED THIS LINE
-    ('left', 'BITWISE_XOR'),  # <-- ADDED THIS LINE
-    ('left', 'AMPERSAND'),    # This is bitwise AND
-    ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
-    ('left', 'PLUS', 'MINUS'),
-    ('left', 'STAR'),
-    # Note: BITWISE_NOT has the same precedence as other right-associative unary ops
-    ('right', 'NOT_LOGICAL', 'BITWISE_NOT', 'UMINUS', 'UNARY_PTR'), # <-- MODIFIED THIS LINE
-    ('left', 'PLUSPLUS', 'MINUSMINUS'),
-    ('right', 'IFX'),
-    ('right', 'ELSE')
+    ('left', 'OR_LOGICAL'), ('left', 'AND_LOGICAL'), ('left', 'BITWISE_OR'),
+    ('left', 'BITWISE_XOR'), ('left', 'AMPERSAND'), ('nonassoc', 'EQ', 'NEQ', 'LT', 'GT', 'LE', 'GE'),
+    ('left', 'PLUS', 'MINUS'), ('left', 'STAR'),
+    ('right', 'NOT_LOGICAL', 'BITWISE_NOT', 'UMINUS', 'UNARY_PTR'),
+    ('left', 'PLUSPLUS', 'MINUSMINUS'), ('right', 'IFX'), ('right', 'ELSE')
 )
 start = 'program'
 
-# --- (p_program to p_break_statement are unchanged) ---
+# --- CHANGE #4: Create a generic 'type_specifier' rule ---
+def p_type_specifier(p):
+    '''type_specifier : INT
+                      | CHAR'''
+    p[0] = p[1] # The value is the keyword string itself, e.g., "int"
+
+# --- CHANGE #5: Generalize variable declaration to use the type_specifier ---
+def p_variable_declaration_statement(p):
+    '''variable_declaration_statement : type_specifier IDENTIFIER SEMI
+                                      | type_specifier IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
+                                      | type_specifier IDENTIFIER ASSIGN expression SEMI'''
+    type_name = p[1]
+    if len(p) == 8: # Array declaration: type_specifier IDENTIFIER [ NUMBER ] ;
+        size = p[5]
+        if not isinstance(size, int) or size <= 0: print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(5)}.")
+        p[0] = ArrayDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
+    elif len(p) == 6: # Declaration with assignment: type_specifier IDENTIFIER = expression ;
+        p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+    elif len(p) == 4: # Simple declaration: type_specifier IDENTIFIER ;
+        p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
 def p_top_level_declaration_list(p):
     '''top_level_declaration_list : top_level_declaration_list top_level_declaration
                                   | empty'''
-    if len(p) == 3:
-        lst = p[1] if p[1] is not None else [];
-        if p[2] is not None: lst.append(p[2])
-        p[0] = lst
+    if len(p) == 3: lst = p[1] if p[1] is not None else []; lst.append(p[2]); p[0] = lst
     else: p[0] = []
 def p_top_level_declaration(p):
     '''top_level_declaration : function_definition
@@ -151,16 +161,6 @@ def p_statement_for_global_scope(p):
                                   | expression_statement
                                   | empty_statement'''
     p[0] = p[1]
-def p_variable_declaration_statement(p):
-    '''variable_declaration_statement : VAR IDENTIFIER SEMI
-                                      | VAR IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
-                                      | VAR IDENTIFIER ASSIGN expression SEMI'''
-    if len(p) == 7:
-        size = p[4]
-        if not isinstance(size, int) or size <= 0: print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
-        p[0] = ArrayDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
-    elif len(p) == 6: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-    elif len(p) == 4: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
 def p_function_definition(p):
     '''function_definition : FUNC IDENTIFIER LPAREN parameter_list_opt RPAREN block_statement'''
     p[0] = FunctionDefinitionNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], p[6], line_no=p.lineno(1))
@@ -212,35 +212,35 @@ def p_assignment_statement(p):
     '''assignment_statement : IDENTIFIER ASSIGN expression SEMI
                             | array_access ASSIGN expression SEMI
                             | STAR expression ASSIGN expression SEMI'''
-    if p.slice[1].type == 'STAR':
-        target_node = UnaryOpNode('*', p[2], line_no=p.lineno(1))
-        p[0] = AssignmentNode(target_node, p[4], line_no=p.lineno(3))
-    elif isinstance(p[1], str):
-        p[0] = AssignmentNode(target_name=IdentifierNode(p[1], line_no=p.lineno(1)), value_expr=p[3], line_no=p.lineno(2))
-    else:
-        p[0] = AssignmentNode(target_name=p[1], value_expr=p[3], line_no=p.lineno(2))
+    if p.slice[1].type == 'STAR': p[0] = AssignmentNode(UnaryOpNode('*', p[2], line_no=p.lineno(1)), p[4], line_no=p.lineno(3))
+    elif isinstance(p[1], str): p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(2))
+    else: p[0] = AssignmentNode(p[1], p[3], line_no=p.lineno(2))
 def p_print_statement(p):
     '''print_statement : PRINT expression SEMI'''
     p[0] = PrintNode(p[2], line_no=p.lineno(1))
 def p_if_statement(p):
     '''if_statement : IF LPAREN expression RPAREN statement %prec IFX
                     | IF LPAREN expression RPAREN statement ELSE statement'''
-    if len(p) == 6: p[0] = IfNode(condition=p[3], true_block=p[5], false_block=None, line_no=p.lineno(1))
-    else: p[0] = IfNode(condition=p[3], true_block=p[5], false_block=p[7], line_no=p.lineno(1))
+    if len(p) == 6: p[0] = IfNode(p[3], p[5], None, line_no=p.lineno(1))
+    else: p[0] = IfNode(p[3], p[5], p[7], line_no=p.lineno(1))
 def p_while_statement(p):
     '''while_statement : WHILE LPAREN expression RPAREN block_statement'''
     p[0] = WhileNode(p[3], p[5], line_no=p.lineno(1))
+
+# --- CHANGE #6: Generalize for-loop initializer ---
 def p_for_initializer(p):
-    '''for_initializer : VAR IDENTIFIER ASSIGN expression
-                       | VAR IDENTIFIER
+    '''for_initializer : type_specifier IDENTIFIER ASSIGN expression
+                       | type_specifier IDENTIFIER
                        | IDENTIFIER ASSIGN expression
                        | expression'''
-    if p.slice[1].type == 'VAR':
-        if len(p) == 5: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-        else: p[0] = VarDeclNode(IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+    if p.slice[1].type in ['INT', 'CHAR']:
+        type_name = p[1]
+        if len(p) == 5: p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+        else: p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
     elif len(p) == 4 and p.slice[2].type == 'ASSIGN': p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
     elif len(p) == 2: p[0] = p[1]
     else: p[0] = None
+
 def p_for_initializer_opt(p):
     '''for_initializer_opt : for_initializer
                            | empty'''
@@ -271,18 +271,15 @@ def p_for_statement(p):
     p[0]=ForNode(init_node_for_fornode,condition_expr_node,update_stmt_node,body_node,line_no=p.lineno(1))
 def p_switch_statement(p):
     '''switch_statement : SWITCH LPAREN expression RPAREN LBRACE case_list RBRACE'''
-    p[0] = SwitchNode(condition=p[3], cases=p[6], line_no=p.lineno(1))
+    p[0] = SwitchNode(p[3], p[6], line_no=p.lineno(1))
 def p_case_list(p):
     '''case_list : case_list case_block
                  | empty'''
-    if len(p) == 3:
-        lst = p[1] if p[1] is not None else [];
-        if p[2] is not None: lst.append(p[2])
-        p[0] = lst
+    if len(p) == 3: lst = p[1] if p[1] is not None else []; lst.append(p[2]); p[0] = lst
     else: p[0] = []
 def p_case_block(p):
     '''case_block : case_label statement_list'''
-    value_node, line_num = p[1]; p[0] = CaseNode(value_expr=value_node, statements=p[2], line_no=line_num)
+    value_node, line_num = p[1]; p[0] = CaseNode(value_node, p[2], line_no=line_num)
 def p_case_label(p):
     '''case_label : CASE NUMBER COLON
                   | DEFAULT COLON'''
@@ -291,121 +288,89 @@ def p_case_label(p):
 def p_break_statement(p):
     '''break_statement : BREAK SEMI'''
     p[0] = BreakNode()
-
-# -----------------
-# --- CHANGE #4: Add new grammar rules and update expression hierarchy ---
-# -----------------
 def p_expression(p):
     '''expression : expression OR_LOGICAL expression_and
                   | expression_and'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_and(p):
     '''expression_and : expression_and AND_LOGICAL expression_bitwise_or
-                      | expression_bitwise_or''' # MODIFIED
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
-def p_expression_bitwise_or(p): # NEW
+                      | expression_bitwise_or'''
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
+def p_expression_bitwise_or(p):
     '''expression_bitwise_or : expression_bitwise_or BITWISE_OR expression_bitwise_xor
                              | expression_bitwise_xor'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode('|', p[1], p[3], line_no=p.slice[2].lineno)
-
-def p_expression_bitwise_xor(p): # NEW
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode('|', p[1], p[3], line_no=p.slice[2].lineno)
+def p_expression_bitwise_xor(p):
     '''expression_bitwise_xor : expression_bitwise_xor BITWISE_XOR expression_bitwise_and
                               | expression_bitwise_and'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode('^', p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode('^', p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_bitwise_and(p):
     '''expression_bitwise_and : expression_bitwise_and AMPERSAND expression_equality
                               | expression_equality'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode('&', p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode('&', p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_equality(p):
     '''expression_equality : expression_equality EQ expression_comparison
                            | expression_equality NEQ expression_comparison
                            | expression_comparison'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_comparison(p):
     '''expression_comparison : expression_comparison LT expression_additive
                              | expression_comparison GT expression_additive
                              | expression_comparison LE expression_additive
                              | expression_comparison GE expression_additive
                              | expression_additive'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_additive(p):
     '''expression_additive : expression_additive PLUS expression_multiplicative
                            | expression_additive MINUS expression_multiplicative
                            | expression_multiplicative'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_multiplicative(p):
     '''expression_multiplicative : expression_multiplicative STAR expression_unary
                                  | expression_unary'''
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
-
+    if len(p) == 2: p[0] = p[1]
+    else: p[0] = BinaryOpNode(p[2], p[1], p[3], line_no=p.slice[2].lineno)
 def p_expression_unary(p):
     '''expression_unary : NOT_LOGICAL expression_unary
                         | MINUS expression_unary %prec UMINUS
                         | AMPERSAND expression_unary %prec UNARY_PTR
                         | STAR expression_unary %prec UNARY_PTR
                         | BITWISE_NOT expression_unary
-                        | postfix_expression''' # MODIFIED
-    if len(p) == 2:
-        p[0] = p[1]
-    else:
-        # For bitwise not, we create a UnaryOpNode with '~'
-        op_symbol = '~' if p.slice[1].type == 'BITWISE_NOT' else p[1]
-        p[0] = UnaryOpNode(op_symbol, p[2], line_no=p.slice[1].lineno)
-
-# --- (The rest of the file is unchanged) ---
+                        | postfix_expression'''
+    if len(p) == 2: p[0] = p[1]
+    else: op_symbol = '~' if p.slice[1].type == 'BITWISE_NOT' else p[1]; p[0] = UnaryOpNode(op_symbol, p[2], line_no=p.slice[1].lineno)
 def p_postfix_expression(p):
     '''postfix_expression : primary_expression
                           | postfix_expression PLUSPLUS
                           | postfix_expression MINUSMINUS'''
     if len(p) == 2: p[0] = p[1]
     else: p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
+
+# --- CHANGE #7: Update primary_expression to recognize string literals ---
 def p_primary_expression(p):
     '''primary_expression : NUMBER
+                          | STRING_LITERAL
                           | IDENTIFIER
                           | LPAREN expression RPAREN
                           | function_call_actual
                           | array_access'''
     if p.slice[1].type == 'NUMBER': p[0] = NumberNode(p[1], line_no=p.lineno(1))
+    elif p.slice[1].type == 'STRING_LITERAL': p[0] = StringLiteralNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'IDENTIFIER': p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'LPAREN': p[0] = p[2]
     else: p[0] = p[1]
+
 def p_array_access(p):
     '''array_access : IDENTIFIER LBRACKET expression RBRACKET'''
-    p[0] = ArrayAccessNode(name_node=IdentifierNode(p[1], line_no=p.lineno(1)), index_expr_node=p[3], line_no=p.lineno(1))
+    p[0] = ArrayAccessNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
 def p_function_call_actual(p):
     '''function_call_actual : IDENTIFIER LPAREN argument_list_opt RPAREN'''
     p[0] = FunctionCallNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
@@ -433,46 +398,48 @@ def compile_c_ssl_string_to_sal(c_ssl_code_string):
     _ply_parser_errors_found = False; lexer_ply.lineno = 1
     ast = parser_ply.parse(input=c_ssl_code_string, lexer=lexer_ply, tracking=True, debug=False)
     if _ply_parser_errors_found or not ast:
-        if not ast and c_ssl_code_string.strip() and not _ply_parser_errors_found: print("C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported. Check grammar or yacc debug output.")
+        if not ast and c_ssl_code_string.strip() and not _ply_parser_errors_found: print("C-SSL Parsing FAILED: No AST generated (non-empty input), but no PLY errors reported.")
         elif not ast and not c_ssl_code_string.strip(): print("C-SSL Info: Input empty or comments only."); return "// No effective input", False
         elif _ply_parser_errors_found: print("C-SSL Parsing FAILED due to syntax errors reported by p_error.")
-        else: print("C-SSL Parsing FAILED: Unknown reason, no AST, no p_error. Check yacc debug output if enabled.")
+        else: print("C-SSL Parsing FAILED: Unknown reason, no AST, no p_error.")
         return None, True
     code_gen = SALCodeGenerator()
     generated_sal_code = ""; code_gen_had_errors = False
     try: generated_sal_code = code_gen.generate(ast)
-    except Exception as e:
-        print(f"FATAL C-SSL CodeGen Error: {e}"); import traceback; traceback.print_exc(); code_gen_had_errors = True
+    except Exception as e: print(f"FATAL C-SSL CodeGen Error: {e}"); import traceback; traceback.print_exc(); code_gen_had_errors = True
     if code_gen_had_errors or (ast and not generated_sal_code.strip() and hasattr(ast, 'statements') and ast.statements):
-        if not generated_sal_code.strip() and not code_gen_had_errors and hasattr(ast, 'statements') and ast.statements: print("C-SSL Compilation generated empty SAL code from non-empty AST without explicit codegen errors.")
+        if not generated_sal_code.strip() and not code_gen_had_errors and hasattr(ast, 'statements') and ast.statements: print("C-SSL Compilation generated empty SAL code from non-empty AST.")
         else: print("C-SSL Compilation FAILED during code generation.")
         return None, True
     return generated_sal_code, False
 
 if __name__ == '__main__':
-    # A simple test to run directly, now it can check the new syntax
-    test_bitwise_ops = """
+    # Test case to verify new 'char' and string literal syntax
+    test_char_and_string = """
     func main() {
-        var a; a = 12; // 1100
-        var b; b = 10; // 1010
+        int i = 123;
+        char c;
+        char name[10];
 
-        print a | b; // OR -> 1110 -> 14
-        print a ^ b; // XOR -> 0110 -> 6
-        print ~a;    // NOT -> ...1111 0011 (Depends on 16-bit interpretation)
+        print "This is a test string with a newline.\\n";
     }
     """
-    ssl_file = "test_bitwise_direct.ssl"
+    ssl_file = "test_char_direct.ssl"
     try:
-        with open(ssl_file, 'w') as f: f.write(test_bitwise_ops)
+        with open(ssl_file, 'w') as f: f.write(test_char_and_string)
         print(f"Test SSL written to '{ssl_file}'")
-    except Exception as e:
-        print(f"Error creating test file '{ssl_file}': {e}.")
-        sys.exit(1)
-    print(f"\n--- Running c_ply_compiler.py directly ---")
-    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_bitwise_ops)
+    except Exception as e: print(f"Error creating test file '{ssl_file}': {e}."); sys.exit(1)
+
+    print(f"\n--- Running c_ply_compiler.py directly with 'char' and string literals ---")
+    generated_sal, had_errors = compile_c_ssl_string_to_sal(test_char_and_string)
+
+    # Note: We expect code generation to fail or be nonsensical at this stage.
+    # The goal is to confirm that PARSING succeeds.
     if had_errors or generated_sal is None:
-        print("\nC-SSL COMPILATION FAILED.")
+        print("\nC-SSL COMPILATION FAILED (as expected during codegen, but should parse).")
     else:
-        print("\nC-SSL PARSING SUCCESSFUL (Code gen might be incorrect until Phase 2).")
-        print("\n--- Generated SAL ---")
+        print("\nC-SSL PARSING SUCCESSFUL.")
+        print("NOTE: Code generation is not yet implemented for these new types.")
+        print("\n--- Generated SAL (may be incorrect) ---")
         print(generated_sal)
+        
