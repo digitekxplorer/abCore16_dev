@@ -2,13 +2,21 @@
 """
 Centralized definitions for the abCore16 microprocessor project.
 Includes opcodes, register names, instruction formats, and other constants.
+MODIFIED: Added a centralized constant for hardware memory size.
 """
 
+# --- Hardware Configuration Constants ---
+# This is the single source of truth for the total size of the data memory
+# in the hardware (FPGA BRAM). The simulator and memory file generator use this.
+HARDWARE_DATA_MEM_SIZE_BYTES = 8192
+
 # --- Opcodes ---
-# (Opcodes section is unchanged)
 OPCODES = {
     "NOP":   0x00, "LOAD":  0x01, "STORE": 0x02, "LOADM": 0x03,
     "LOADFR":0x04, "STORFR":0x05, "LOADI": 0x06, "STORI": 0x07,
+    # Byte access not implemented in backend modules yet
+    "LOADB": 0x08, "STORB": 0x09, "LOADIB":0x0A, "STORIB":0x0B,
+
     "ADD":   0x10, "SUB":   0x11, "MUL":   0x12, "INC":   0x13, "DEC":   0x14,
     "AND":   0x20, "OR":    0x21, "XOR":   0x22, "NOT":   0x23,
     "SHL":   0x24, "SHR":   0x25, "L_AND": 0x26, "L_OR":  0x27, "L_NOT": 0x28,
@@ -25,7 +33,6 @@ OPCODES = {
 REVERSE_OPCODES = {v: k for k, v in OPCODES.items()}
 
 # --- Registers ---
-# (Registers section is unchanged)
 REG_NAMES = {
     0: 'R0', 1: 'R1', 2: 'R2', 3: 'R3',
     4: 'R4', 5: 'R5', 6: 'R6', 7: 'R7'
@@ -34,18 +41,19 @@ REG_CODES = {v: k for k, v in REG_NAMES.items()}
 VALID_REGISTERS = set(REG_CODES.keys())
 
 # --- Instruction Formats ---
-# (Instruction Formats section is unchanged)
 INSTRUCTION_FORMATS = {
     "NOP":   (1, []), "HALT":  (1, []), "RET":   (1, []), "LOAD":  (4, ['R', 'I16']),
     "STORE": (4, ['R', 'A16']), "LOADM": (4, ['R', 'A16']), "LOADFR":(5, ['R', 'R', 'S16']),
     "STORFR":(5, ['R', 'R', 'S16']), "LOADI": (3, ['R', 'R']), "STORI": (3, ['R', 'R']),
+    "LOADB": (4, ['R', 'A16']), "STORB": (4, ['R', 'A16']), "LOADIB":(3, ['R', 'R']),
+    "STORIB":(3, ['R', 'R']),
     "INM":   (4, ['R', 'A16']), "OUTM":  (4, ['R', 'A16']), "ADD":   (3, ['R', 'R']),
     "SUB":   (3, ['R', 'R']), "MUL":   (3, ['R', 'R']), "AND":   (3, ['R', 'R']),
     "OR":    (3, ['R', 'R']), "XOR":   (3, ['R', 'R']), "CMP":   (3, ['R', 'R']),
     "MOV":   (3, ['R', 'R']), "MOVFRSP": (2, ['R']), "MOVTOSP": (2, ['R']),
     "INC":   (2, ['R']), "DEC":   (2, ['R']), "NOT":   (2, ['R']), "INP":   (2, ['R']),
     "OUT":   (2, ['R']), "PUSH":  (2, ['R']), "POP":   (2, ['R']), "SHL":   (3, ['R', 'I8']),
-    "SHR":   (3, ['R', 'I8']), "L_AND": (4, ['R', 'R', 'R']), "L_OR":  (4, ['R', 'R', 'R']),
+    "SHR":   (3, ['R', 'I8']), "L_AND": (4, ['R', 'R', 'R']), "L_or":  (4, ['R', 'R', 'R']),
     "L_NOT": (3, ['R', 'R']), "JMP":   (3, ['A16']), "JE": (3, ['A16']), "JNE": (3, ['A16']),
     "JS":    (3, ['A16']), "JNS": (3, ['A16']), "JC": (3, ['A16']), "JNC": (3, ['A16']),
     "JO":    (3, ['A16']), "JNO": (3, ['A16']), "CALL":  (3, ['A16']),
@@ -53,7 +61,6 @@ INSTRUCTION_FORMATS = {
 }
 
 # --- Value Constants ---
-# (Value Constants section is unchanged)
 MAX_IMMEDIATE_16BIT = 0xFFFF
 MAX_ADDRESS_16BIT   = 0xFFFF
 MAX_IMMEDIATE_8BIT  = 0xFF
@@ -61,7 +68,6 @@ MIN_SIGNED_IMMEDIATE_16BIT = -32768
 MAX_SIGNED_IMMEDIATE_16BIT = 32767
 
 # --- Memory Layout Constants ---
-DEFAULT_MMIO_INPUT_ADDR  = 0x00FE
-DEFAULT_MMIO_OUTPUT_ADDR = 0x00FF
-# FIX: Centralized start address for the compiler's global data section
-GLOBAL_DATA_START_ADDR = 0x0800
+DEFAULT_MMIO_INPUT_ADDR  = 0x17FE
+DEFAULT_MMIO_OUTPUT_ADDR = 0x17FF
+GLOBAL_DATA_START_ADDR = 0x1000
