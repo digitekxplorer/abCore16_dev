@@ -1,11 +1,10 @@
 # c_ply_compiler.py
-# MODIFIED: Added 'char' type and string literals.
+# MODIFIED: Added char literals and pointer declaration support.
 
 import os
 import sys
 from ply.lex import lex
 from ply.yacc import yacc
-# import logging
 
 from ast_nodes import (
     Node, ProgramNode, StatementNode, AssignmentNode, PrintNode, IfNode, WhileNode,
@@ -15,14 +14,15 @@ from ast_nodes import (
     ForNode, VarDeclNode,
     ArrayDeclNode, ArrayAccessNode, PostfixOpNode,
     SwitchNode, CaseNode, BreakNode,
-    StringLiteralNode  # <-- Import the new node
+    StringLiteralNode,
+    CharLiteralNode  # <-- CHANGE #1: Import the new node
 )
 
 # --- Tokenizer (Lexer) Definition ---
 
-# --- CHANGE #1: Add new tokens CHAR and STRING_LITERAL ---
+# --- CHANGE #2: Add CHAR_LITERAL to tokens list ---
 tokens = (
-    'NUMBER', 'IDENTIFIER', 'STRING_LITERAL',
+    'NUMBER', 'IDENTIFIER', 'STRING_LITERAL', 'CHAR_LITERAL',
     'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
     'AMPERSAND', 'ASSIGN', 'SEMI',
     'LPAREN', 'RPAREN', 'LBRACE', 'RBRACE', 'LBRACKET', 'RBRACKET', 'COMMA', 'COLON',
@@ -64,20 +64,22 @@ t_BITWISE_OR = r'\|'
 t_BITWISE_XOR = r'\^'
 t_BITWISE_NOT = r'~'
 
-# --- CHANGE #2: Add 'char' to reserved words ---
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
     'func': 'FUNC', 'return': 'RETURN', 'int': 'INT', 'char': 'CHAR',
     'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
 }
 
-# --- CHANGE #3: New lexer rule for string literals ---
 def t_STRING_LITERAL(t):
     r'\"([^"\\]|\\.)*\"'
-    # Remove the outer quotes
     str_val = t.value[1:-1]
-    # Process escape sequences like \n, \t, \\, \"
     t.value = str_val.encode().decode('unicode_escape')
+    return t
+
+# --- CHANGE #3: Add new lexer rule for char literals ---
+def t_CHAR_LITERAL(t):
+    r"'([^\\']|\\.)'"
+    t.value = t.value[1:-1]  # Remove the outer quotes
     return t
 
 def t_IDENTIFIER(t):
@@ -121,19 +123,25 @@ precedence = (
 )
 start = 'program'
 
-# --- CHANGE #4: Create a generic 'type_specifier' rule ---
 def p_type_specifier(p):
     '''type_specifier : INT
                       | CHAR'''
-    p[0] = p[1] # The value is the keyword string itself, e.g., "int"
+    p[0] = p[1]
 
-# --- CHANGE #5: Generalize variable declaration to use the type_specifier ---
+# --- CHANGE #4: Add pointer declarations to the grammar rule ---
 def p_variable_declaration_statement(p):
     '''variable_declaration_statement : type_specifier IDENTIFIER SEMI
                                       | type_specifier IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
-                                      | type_specifier IDENTIFIER ASSIGN expression SEMI'''
+                                      | type_specifier IDENTIFIER ASSIGN expression SEMI
+                                      | type_specifier STAR IDENTIFIER SEMI
+                                      | type_specifier STAR IDENTIFIER ASSIGN expression SEMI'''
     type_name = p[1]
-    if len(p) == 8: # Array declaration: type_specifier IDENTIFIER [ NUMBER ] ;
+    if p[2] == '*': # Pointer Declaration: e.g., char *p;
+        if len(p) == 5: # No assignment
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), None, is_pointer=True, line_no=p.lineno(1))
+        else: # With assignment
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), p[5], is_pointer=True, line_no=p.lineno(1))
+    elif len(p) == 8: # Array declaration: type_specifier IDENTIFIER [ NUMBER ] ;
         size = p[5]
         if not isinstance(size, int) or size <= 0: print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(5)}.")
         p[0] = ArrayDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
@@ -142,6 +150,7 @@ def p_variable_declaration_statement(p):
     elif len(p) == 4: # Simple declaration: type_specifier IDENTIFIER ;
         p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
 
+# (The rest of the parser rules from this point on are UNCHANGED from your Gist file)
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
@@ -227,7 +236,6 @@ def p_while_statement(p):
     '''while_statement : WHILE LPAREN expression RPAREN block_statement'''
     p[0] = WhileNode(p[3], p[5], line_no=p.lineno(1))
 
-# --- CHANGE #6: Generalize for-loop initializer ---
 def p_for_initializer(p):
     '''for_initializer : type_specifier IDENTIFIER ASSIGN expression
                        | type_specifier IDENTIFIER
@@ -354,16 +362,18 @@ def p_postfix_expression(p):
     if len(p) == 2: p[0] = p[1]
     else: p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
 
-# --- CHANGE #7: Update primary_expression to recognize string literals ---
+# --- CHANGE #5: Add CHAR_LITERAL to this grammar rule ---
 def p_primary_expression(p):
     '''primary_expression : NUMBER
                           | STRING_LITERAL
+                          | CHAR_LITERAL
                           | IDENTIFIER
                           | LPAREN expression RPAREN
                           | function_call_actual
                           | array_access'''
     if p.slice[1].type == 'NUMBER': p[0] = NumberNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'STRING_LITERAL': p[0] = StringLiteralNode(p[1], line_no=p.lineno(1))
+    elif p.slice[1].type == 'CHAR_LITERAL': p[0] = CharLiteralNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'IDENTIFIER': p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'LPAREN': p[0] = p[2]
     else: p[0] = p[1]
@@ -392,6 +402,8 @@ def p_error(p):
     if p: print(f"PLY Parser: Error token '{p.type}' ('{p.value}') line {p.lineno} pos {p.lexpos}")
     else: print(f"PLY Parser: Syntax error at EOF.")
 parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
+
+# (The rest of the file, including the compile function and __main__, is UNCHANGED)
 from code_generator import SALCodeGenerator
 def compile_c_ssl_string_to_sal(c_ssl_code_string):
     global _ply_parser_errors_found
@@ -414,13 +426,11 @@ def compile_c_ssl_string_to_sal(c_ssl_code_string):
     return generated_sal_code, False
 
 if __name__ == '__main__':
-    # Test case to verify new 'char' and string literal syntax
     test_char_and_string = """
     func main() {
         int i = 123;
         char c;
         char name[10];
-
         print "This is a test string with a newline.\\n";
     }
     """
@@ -429,12 +439,8 @@ if __name__ == '__main__':
         with open(ssl_file, 'w') as f: f.write(test_char_and_string)
         print(f"Test SSL written to '{ssl_file}'")
     except Exception as e: print(f"Error creating test file '{ssl_file}': {e}."); sys.exit(1)
-
     print(f"\n--- Running c_ply_compiler.py directly with 'char' and string literals ---")
     generated_sal, had_errors = compile_c_ssl_string_to_sal(test_char_and_string)
-
-    # Note: We expect code generation to fail or be nonsensical at this stage.
-    # The goal is to confirm that PARSING succeeds.
     if had_errors or generated_sal is None:
         print("\nC-SSL COMPILATION FAILED (as expected during codegen, but should parse).")
     else:
@@ -442,4 +448,3 @@ if __name__ == '__main__':
         print("NOTE: Code generation is not yet implemented for these new types.")
         print("\n--- Generated SAL (may be incorrect) ---")
         print(generated_sal)
-        
