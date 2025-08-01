@@ -50,6 +50,16 @@ class StringLiteralNode(ExpressionNode):
         # Display escaped characters for clarity in debug output
         return f'StringLiteralNode(value="{self.value.encode("unicode_escape").decode("utf-8")}")'
 
+# --- ADD THIS NEW CLASS ---
+class CharLiteralNode(ExpressionNode):
+    """Represents a character literal, e.g., 'A'."""
+    def __init__(self, value, line_no=None):
+        super().__init__(line_no)
+        self.value = value
+
+    def __repr__(self):
+        return f"CharLiteralNode(value='{self.value}')"
+
 
 class AssignmentNode(StatementNode):
     def __init__(self, target_name, value_expr, line_no=None):
@@ -60,19 +70,21 @@ class AssignmentNode(StatementNode):
     def __repr__(self):
         return f"AssignmentNode(target={self.target_name!r}, value_expr={self.value_expr!r})"
 
-
 class VarDeclNode(StatementNode):
     """Represents a variable declaration, e.g., 'int x;' or 'char c;'."""
 
-    def __init__(self, data_type, var_name_node, init_expr_node, line_no=None):
+    # The only change is adding 'is_pointer=False' to the constructor
+    def __init__(self, data_type, var_name_node, init_expr_node, is_pointer=False, line_no=None):
         super().__init__(line_no)
         self.data_type = data_type
         self.var_name_node = var_name_node
         self.init_expr_node = init_expr_node
+        self.is_pointer = is_pointer # And adding this line
 
     def __repr__(self):
-        return f"VarDeclNode(type='{self.data_type}', var_name='{self.var_name_node.name}', initialized={self.init_expr_node is not None})"
-
+        # Optional: Update repr to show pointer status
+        ptr_str = "*" if self.is_pointer else ""
+        return f"VarDeclNode(type='{self.data_type}{ptr_str}', var_name='{self.var_name_node.name}', initialized={self.init_expr_node is not None})"
 
 class ArrayDeclNode(StatementNode):
     """Represents a global array declaration, e.g., 'int my_arr[10];'."""
@@ -289,4 +301,3 @@ class SwitchNode(StatementNode):
             return visitor.visit_SwitchNode(self)
         else:
             return visitor.generic_visit(self)
-            
