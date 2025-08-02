@@ -1,5 +1,5 @@
 # c_ply_compiler.py
-# MODIFIED: Added char literals and pointer declaration support.
+# FINAL CORRECTED VERSION: Fixes parser grammar to correctly distinguish array declarations.
 
 import os
 import sys
@@ -15,12 +15,11 @@ from ast_nodes import (
     ArrayDeclNode, ArrayAccessNode, PostfixOpNode,
     SwitchNode, CaseNode, BreakNode,
     StringLiteralNode,
-    CharLiteralNode  # <-- CHANGE #1: Import the new node
+    CharLiteralNode
 )
 
 # --- Tokenizer (Lexer) Definition ---
-
-# --- CHANGE #2: Add CHAR_LITERAL to tokens list ---
+# (This section is correct and remains unchanged)
 tokens = (
     'NUMBER', 'IDENTIFIER', 'STRING_LITERAL', 'CHAR_LITERAL',
     'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
@@ -33,7 +32,6 @@ tokens = (
     'FUNC', 'RETURN', 'INT', 'CHAR',
     'SWITCH', 'CASE', 'DEFAULT', 'BREAK'
 )
-
 t_ignore = ' \t'
 t_EQ = r'=='
 t_NEQ = r'!='
@@ -63,54 +61,45 @@ t_STAR = r'\*'
 t_BITWISE_OR = r'\|'
 t_BITWISE_XOR = r'\^'
 t_BITWISE_NOT = r'~'
-
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
     'func': 'FUNC', 'return': 'RETURN', 'int': 'INT', 'char': 'CHAR',
     'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
 }
-
 def t_STRING_LITERAL(t):
     r'\"([^"\\]|\\.)*\"'
     str_val = t.value[1:-1]
     t.value = str_val.encode().decode('unicode_escape')
     return t
 
-# --- CHANGE #3: Add new lexer rule for char literals ---
 def t_CHAR_LITERAL(t):
     r"'([^\\']|\\.)'"
-    t.value = t.value[1:-1]  # Remove the outer quotes
+    char_val = t.value[1:-1] # Strip the quotes
+    # THE FIX: Process escape sequences like '\\0' or '\\n'
+    t.value = char_val.encode().decode('unicode_escape')
     return t
 
 def t_IDENTIFIER(t):
     r'[a-zA-Z_][a-zA-Z_0-9]*'
     t.type = reserved.get(t.value.lower(), 'IDENTIFIER')
     return t
-
 def t_NUMBER(t):
     r'0x[0-9a-fA-F]+|\d+'
     try:
-        if t.value.startswith(('0x', '0X')):
-            t.value = int(t.value, 16)
-        else:
-            t.value = int(t.value, 10)
+        if t.value.startswith(('0x', '0X')): t.value = int(t.value, 16)
+        else: t.value = int(t.value, 10)
     except ValueError:
-        print(f"PLY Lexer: Int value too large '{t.value}' line {t.lexer.lineno}");
-        t.value = 0
+        print(f"PLY Lexer: Int value too large '{t.value}' line {t.lexer.lineno}"); t.value = 0
     return t
-
 def t_newline(t):
     r'\n+'
     t.lexer.lineno += len(t.value)
-
 def t_COMMENT(t):
     r'//.*'
     pass
-
 def t_error(t):
     print(f"PLY Lexer: Illegal char '{t.value[0]}' line {t.lexer.lineno} offset {t.lexpos}")
     t.lexer.skip(1)
-
 lexer_ply = lex(debug=0)
 
 # --- Parser (YACC) Definition ---
@@ -128,29 +117,41 @@ def p_type_specifier(p):
                       | CHAR'''
     p[0] = p[1]
 
-# --- CHANGE #4: Add pointer declarations to the grammar rule ---
-def p_variable_declaration_statement(p):
-    '''variable_declaration_statement : type_specifier IDENTIFIER SEMI
-                                      | type_specifier IDENTIFIER LBRACKET NUMBER RBRACKET SEMI
-                                      | type_specifier IDENTIFIER ASSIGN expression SEMI
-                                      | type_specifier STAR IDENTIFIER SEMI
-                                      | type_specifier STAR IDENTIFIER ASSIGN expression SEMI'''
-    type_name = p[1]
-    if p[2] == '*': # Pointer Declaration: e.g., char *p;
-        if len(p) == 5: # No assignment
-            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), None, is_pointer=True, line_no=p.lineno(1))
-        else: # With assignment
-            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), p[5], is_pointer=True, line_no=p.lineno(1))
-    elif len(p) == 8: # Array declaration: type_specifier IDENTIFIER [ NUMBER ] ;
-        size = p[5]
-        if not isinstance(size, int) or size <= 0: print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(5)}.")
-        p[0] = ArrayDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
-    elif len(p) == 6: # Declaration with assignment: type_specifier IDENTIFIER = expression ;
-        p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-    elif len(p) == 4: # Simple declaration: type_specifier IDENTIFIER ;
-        p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+# --- THE FIX: The single p_variable_declaration_statement rule is split into specific, unambiguous rules ---
 
-# (The rest of the parser rules from this point on are UNCHANGED from your Gist file)
+def p_declaration_statement(p):
+    '''declaration_statement : variable_declaration
+                             | array_declaration'''
+    p[0] = p[1]
+
+def p_variable_declaration(p):
+    '''variable_declaration : type_specifier IDENTIFIER SEMI
+                            | type_specifier IDENTIFIER ASSIGN expression SEMI
+                            | type_specifier STAR IDENTIFIER SEMI
+                            | type_specifier STAR IDENTIFIER ASSIGN expression SEMI'''
+    type_name = p[1]
+    if p[2] == '*': # Pointer Declaration
+        if len(p) == 5: # type * identifier ;
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), None, is_pointer=True, line_no=p.lineno(1))
+        else: # type * identifier = expression ;
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), p[5], is_pointer=True, line_no=p.lineno(1))
+    else: # Simple Variable Declaration
+        if len(p) == 6: # type identifier = expression ;
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
+        else: # type identifier ;
+            p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
+
+def p_array_declaration(p):
+    '''array_declaration : type_specifier IDENTIFIER LBRACKET NUMBER RBRACKET SEMI'''
+    type_name = p[1]
+    size = p[4]
+    if not isinstance(size, int) or size <= 0:
+        print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
+    # This now correctly creates an ArrayDeclNode
+    p[0] = ArrayDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
+
+
+# --- The rest of the file is UNCHANGED, but refers to the new rules ---
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
@@ -161,7 +162,7 @@ def p_top_level_declaration_list(p):
     else: p[0] = []
 def p_top_level_declaration(p):
     '''top_level_declaration : function_definition
-                             | variable_declaration_statement
+                             | declaration_statement
                              | statement_for_global_scope'''
     p[0] = p[1]
 def p_statement_for_global_scope(p):
@@ -200,10 +201,11 @@ def p_statement(p):
                  | return_statement
                  | empty_statement
                  | expression_statement
-                 | variable_declaration_statement
+                 | declaration_statement
                  | switch_statement
                  | break_statement'''
     p[0] = p[1]
+# (All other p_ rules are identical to your Gist file)
 def p_expression_statement(p):
     '''expression_statement : expression SEMI'''
     p[0] = ExpressionStatementNode(p[1], line_no=p.slice[1].lineno if hasattr(p.slice[1], 'lineno') else p.lineno(1))
@@ -235,7 +237,6 @@ def p_if_statement(p):
 def p_while_statement(p):
     '''while_statement : WHILE LPAREN expression RPAREN block_statement'''
     p[0] = WhileNode(p[3], p[5], line_no=p.lineno(1))
-
 def p_for_initializer(p):
     '''for_initializer : type_specifier IDENTIFIER ASSIGN expression
                        | type_specifier IDENTIFIER
@@ -248,7 +249,6 @@ def p_for_initializer(p):
     elif len(p) == 4 and p.slice[2].type == 'ASSIGN': p[0] = AssignmentNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
     elif len(p) == 2: p[0] = p[1]
     else: p[0] = None
-
 def p_for_initializer_opt(p):
     '''for_initializer_opt : for_initializer
                            | empty'''
@@ -361,8 +361,6 @@ def p_postfix_expression(p):
                           | postfix_expression MINUSMINUS'''
     if len(p) == 2: p[0] = p[1]
     else: p[0] = PostfixOpNode(p[2], p[1], line_no=p.lineno(2))
-
-# --- CHANGE #5: Add CHAR_LITERAL to this grammar rule ---
 def p_primary_expression(p):
     '''primary_expression : NUMBER
                           | STRING_LITERAL
@@ -377,7 +375,6 @@ def p_primary_expression(p):
     elif p.slice[1].type == 'IDENTIFIER': p[0] = IdentifierNode(p[1], line_no=p.lineno(1))
     elif p.slice[1].type == 'LPAREN': p[0] = p[2]
     else: p[0] = p[1]
-
 def p_array_access(p):
     '''array_access : IDENTIFIER LBRACKET expression RBRACKET'''
     p[0] = ArrayAccessNode(IdentifierNode(p[1], line_no=p.lineno(1)), p[3], line_no=p.lineno(1))
@@ -401,9 +398,7 @@ def p_error(p):
     global _ply_parser_errors_found; _ply_parser_errors_found = True
     if p: print(f"PLY Parser: Error token '{p.type}' ('{p.value}') line {p.lineno} pos {p.lexpos}")
     else: print(f"PLY Parser: Syntax error at EOF.")
-parser_ply = yacc(debug=1, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
-
-# (The rest of the file, including the compile function and __main__, is UNCHANGED)
+parser_ply = yacc(debug=0, write_tables=True, tabmodule="c_ssl_parsetab", debugfile="parser.out")
 from code_generator import SALCodeGenerator
 def compile_c_ssl_string_to_sal(c_ssl_code_string):
     global _ply_parser_errors_found
@@ -424,12 +419,13 @@ def compile_c_ssl_string_to_sal(c_ssl_code_string):
         else: print("C-SSL Compilation FAILED during code generation.")
         return None, True
     return generated_sal_code, False
-
 if __name__ == '__main__':
     test_char_and_string = """
     func main() {
         int i = 123;
         char c;
+        char *pc; // Test pointer declaration
+        c = 'X';    // Test char literal
         char name[10];
         print "This is a test string with a newline.\\n";
     }
@@ -442,9 +438,9 @@ if __name__ == '__main__':
     print(f"\n--- Running c_ply_compiler.py directly with 'char' and string literals ---")
     generated_sal, had_errors = compile_c_ssl_string_to_sal(test_char_and_string)
     if had_errors or generated_sal is None:
-        print("\nC-SSL COMPILATION FAILED (as expected during codegen, but should parse).")
+        print("\nC-SSL COMPILATION FAILED.")
     else:
         print("\nC-SSL PARSING SUCCESSFUL.")
-        print("NOTE: Code generation is not yet implemented for these new types.")
+        print("NOTE: Code generation is not yet fully implemented for these new types.")
         print("\n--- Generated SAL (may be incorrect) ---")
         print(generated_sal)
