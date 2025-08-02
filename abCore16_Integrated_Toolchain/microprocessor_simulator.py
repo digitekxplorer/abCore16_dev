@@ -144,15 +144,37 @@ class MicroprocessorSimulator:
         return 0
 
     def _handle_mmio_write(self, word_address, value):
-        eff_addr = self._apply_16bit_limits(word_address);
+        eff_addr = self._apply_16bit_limits(word_address)
         val16 = self._apply_16bit_limits(value)
+
         if eff_addr == DEFAULT_MMIO_OUTPUT_ADDR:
             self.sim_last_output_value = val16
+
+            # EXISTING: Original numeric output line (preserved for compatibility)
             output_line = f"SIM MMIO OUTPUT (0x{eff_addr:04X}h): {val16}"
-            print(output_line);
+            print(output_line)
             self.mmio_output_lines.append(output_line)
+
+            # NEW: Additional character display for ASCII values
+            if 32 <= val16 <= 126:  # Printable ASCII characters
+                char_output = chr(val16)
+                print(f"CHAR OUTPUT: '{char_output}'")
+            elif val16 == 10:  # Newline character
+                print("CHAR OUTPUT: '\\n' (newline)")
+                print()  # Also print actual newline for visual effect
+            elif val16 == 13:  # Carriage return
+                print("CHAR OUTPUT: '\\r' (carriage return)")
+            elif val16 == 9:  # Tab
+                print("CHAR OUTPUT: '\\t' (tab)")
+            elif val16 == 0:  # Null terminator
+                print("CHAR OUTPUT: '\\0' (null terminator)")
+            else:  # Other values
+                print(f"CHAR OUTPUT: [non-printable ASCII {val16}]")
+
+            # EXISTING: Original log entry (preserved)
             self.output_log.append(f"  MMIO Write OUTPUT(0x{eff_addr:04X}h): Val=0x{val16:04X}")
         else:
+            # EXISTING: All other MMIO handling (unchanged)
             byte_address = eff_addr * 2
             if self._is_valid_data_memory_byte_address(byte_address + 1):
                 self.data_memory[byte_address] = val16 & 0xFF
@@ -258,14 +280,28 @@ class MicroprocessorSimulator:
                 self.data_memory[eff_addr + 1] = (val16 >> 8) & 0xFF
                 self.output_log.append(
                     f"  STORFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => 0x{eff_addr:04X}] = {rt_name}")
+
             elif opcode_str == "LOADI":
                 rd_code, rs_addr_code = self._fetch_byte_from_program(), self._fetch_byte_from_program();
                 rd_name, rs_addr_name = self._get_reg_name(rd_code), self._get_reg_name(rs_addr_code)
-                word_addr = self.registers[rs_addr_name];
-                val = self._handle_mmio_read(word_addr)
-                self.registers[rd_name] = self._apply_16bit_limits(val);
+                byte_address = self.registers[rs_addr_name]  # This is a byte address from the register
+
+                # Check if it's a valid byte address for word access (need 2 consecutive bytes)
+                if not self._is_valid_data_memory_byte_address(byte_address) or \
+                        not self._is_valid_data_memory_byte_address(byte_address + 1):
+                        # If it's not in our data memory range, treat as MMIO (convert to word address)
+                        word_addr = byte_address // 2  # Convert byte address to word address for MMIO
+                        val = self._handle_mmio_read(word_addr)
+                else:
+                    # Read directly from data memory as a word (little-endian)
+                    low = self.data_memory[byte_address]
+                    high = self.data_memory[byte_address + 1]
+                    val = (high << 8) | low
+
+                self.registers[rd_name] = self._apply_16bit_limits(val)
                 self._update_flags(self.registers[rd_name], "LOADI")
-                self.output_log.append(f"  LOADI: {rd_name} = Mem[{rs_addr_name}(WORD:0x{word_addr:04X})]")
+                self.output_log.append(f"  LOADI: {rd_name} = Mem[{rs_addr_name}(ADDR:0x{byte_address:04X})] = 0x{val:04X}")
+
             elif opcode_str == "STORI":
                 rt_val_code, rs_addr_code = self._fetch_byte_from_program(), self._fetch_byte_from_program();
                 rt_val_name, rs_addr_name = self._get_reg_name(rt_val_code), self._get_reg_name(rs_addr_code)
