@@ -742,7 +742,7 @@ class SALCodeGenerator:
         self.emit(f"JMP {condition_label}");
         self.emit(f"{body_label}:")
         self.break_label_stack.append(end_while_label)
-        if node.body_node: node.body_node.accept(self)
+        if node.body_block: node.body_block.accept(self)
         self.break_label_stack.pop();
         self.emit(f"JMP {condition_label}");
         self.emit(f"{condition_label}:")
