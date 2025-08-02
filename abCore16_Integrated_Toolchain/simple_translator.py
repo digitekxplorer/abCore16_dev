@@ -22,6 +22,16 @@ class SimpleTranslator:
              "LOADFR {0}, {1}, #{2}", ['R', 'R', 'S16']),
             (re.compile(r"STORFR\s+(R[0-7])\s*,?\s*(R[0-7])\s*,?\s*([+-]?(?:0x[0-9a-fA-F]+|\d+))", re.IGNORECASE),
              "STORFR {0}, {1}, #{2}", ['R', 'R', 'S16']),
+
+            # NEW BYTE INSTRUCTIONS
+            (re.compile(r"LOADB\s+(R[0-7])\s*,?\s*(0x[0-9A-Fa-f]+|\d+)", re.IGNORECASE), "LOADB {0}, {1}",
+             ['R', 'A16']),
+            (re.compile(r"STORB\s+(R[0-7])\s*,?\s*(0x[0-9A-Fa-f]+|\d+)", re.IGNORECASE), "STORB {0}, {1}",
+             ['R', 'A16']),
+            (re.compile(r"LOADIB\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "LOADIB {0}, {1}", ['R', 'R']),
+            (re.compile(r"STORIB\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "STORIB {0}, {1}", ['R', 'R']),
+
+            # EXISTING INSTRUCTIONS
             (re.compile(r"LOADI\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "LOADI {0}, {1}", ['R', 'R']),
             (re.compile(r"STORI\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "STORI {0}, {1}", ['R', 'R']),
             (re.compile(r"MOVFRSP\s+(R[0-7])", re.IGNORECASE), "MOVFRSP {0}", ['R']),
@@ -193,25 +203,39 @@ class SimpleTranslator:
 # Standalone test
 if __name__ == "__main__":
     translator = SimpleTranslator()
-    # Test program with corrected typo and mixed comma/no-comma syntax
-    test_ssl_new_ops = """
-    // Test new instructions for abCore16 with flexible syntax
-    SET R0, 0x1234          // Comma syntax
-    SET R1 0x1000           // No-comma syntax
-    SET R7, 0x2000          
+    # Test program with byte instructions and mixed comma/no-comma syntax
+    test_ssl_byte_ops = """
+    // Test new byte instructions for abCore16
+    SET R0, 0x1234          // Load a test value
+    SET R1, 0x2000          // Load byte address
+    SET R2, 0x2001          // Load another byte address
 
-    // Test indirect store/load
-    STORI R0, R1           // Comma syntax
-    LOADI R2 R1            // No-comma syntax
+    // Test direct byte access
+    STORB R0, 0x1500        // Store byte to direct address
+    LOADB R3, 0x1500        // Load byte from direct address
 
-    // Test frame-relative store/load (with corrected typo)
-    STOREFR R0 R7 -4    // No-comma, with negative offset
-    LOADFR  R3, R7, -4  // Comma, with negative offset
+    // Test indirect byte access
+    STORIB R0, R1           // Store byte using register indirect
+    LOADIB R4 R1            // Load byte using register indirect
+
+    // Test with no-comma syntax
+    STORIB R3 R2            // Store with no comma
+    LOADIB R5, R2           // Load with comma
+
+    // Test mixed with existing instructions
+    LOADI R6, R1            // Word indirect load
+    STORI R6, R2            // Word indirect store
+
+    PRINT R3                // Output the byte value
+    PRINT R4                // Output another byte value
 
     HALT
     """
-    print(f"Translating SSL with new instructions and flexible syntax:\n{test_ssl_new_ops}")
-    compiled_sal, had_errors = translator.translate_program(test_ssl_new_ops)
+    print(f"Translating SSL with new byte instructions:\n{test_ssl_byte_ops}")
+    compiled_sal, had_errors = translator.translate_program(test_ssl_byte_ops)
     print("\nTranslated SAL:")
     print(compiled_sal)
-    if had_errors: print("\nTranslator reported errors.")
+    if had_errors:
+        print("\nTranslator reported errors.")
+    else:
+        print("\nTranslation completed successfully!")
