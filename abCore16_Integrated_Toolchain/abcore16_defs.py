@@ -2,7 +2,7 @@
 """
 Centralized definitions for the abCore16 microprocessor project.
 Includes opcodes, register names, instruction formats, and other constants.
-MODIFIED: Added a centralized constant for hardware memory size.
+MODIFIED: Added LOADBFR and STORBFR frame-relative byte instructions.
 """
 
 # --- Hardware Configuration Constants ---
@@ -12,22 +12,23 @@ HARDWARE_DATA_MEM_SIZE_BYTES = 8192
 
 # --- Opcodes ---
 OPCODES = {
-    "NOP":   0x00, "LOAD":  0x01, "STORE": 0x02, "LOADM": 0x03,
-    "LOADFR":0x04, "STORFR":0x05, "LOADI": 0x06, "STORI": 0x07,
-    # Byte access not implemented in backend modules yet
-    "LOADB": 0x08, "STORB": 0x09, "LOADIB":0x0A, "STORIB":0x0B,
+    "NOP": 0x00, "LOAD": 0x01, "STORE": 0x02, "LOADM": 0x03,
+    "LOADFR": 0x04, "STORFR": 0x05, "LOADI": 0x06, "STORI": 0x07,
+    # Byte access instructions
+    "LOADB": 0x08, "STORB": 0x09, "LOADIB": 0x0A, "STORIB": 0x0B,
+    "LOADBFR": 0x0C, "STORBFR": 0x0D,  # NEW: Frame-relative byte instructions
 
-    "ADD":   0x10, "SUB":   0x11, "MUL":   0x12, "INC":   0x13, "DEC":   0x14,
-    "AND":   0x20, "OR":    0x21, "XOR":   0x22, "NOT":   0x23,
-    "SHL":   0x24, "SHR":   0x25, "L_AND": 0x26, "L_OR":  0x27, "L_NOT": 0x28,
-    "INP":   0x30, "OUT":   0x31, "INM":   0x32, "OUTM":  0x33,
-    "CMP":   0x40,
-    "JMP":   0x50, "JMPZ":  0x51, "JMPN":  0x52, "JE":    0x53, "JNE":   0x54,
-    "JS":    0x55, "JNS":   0x56, "JC":    0x57, "JNC":   0x58, "JO":    0x59, "JNO":   0x5A,
-    "PUSH":  0x60, "POP":   0x61,
-    "CALL":  0x70, "RET":   0x71,
-    "MOV":   0x80, "MOVFRSP": 0x81, "MOVTOSP": 0x82,
-    "HALT":  0xFF
+    "ADD": 0x10, "SUB": 0x11, "MUL": 0x12, "INC": 0x13, "DEC": 0x14,
+    "AND": 0x20, "OR": 0x21, "XOR": 0x22, "NOT": 0x23,
+    "SHL": 0x24, "SHR": 0x25, "L_AND": 0x26, "L_OR": 0x27, "L_NOT": 0x28,
+    "INP": 0x30, "OUT": 0x31, "INM": 0x32, "OUTM": 0x33,
+    "CMP": 0x40,
+    "JMP": 0x50, "JMPZ": 0x51, "JMPN": 0x52, "JE": 0x53, "JNE": 0x54,
+    "JS": 0x55, "JNS": 0x56, "JC": 0x57, "JNC": 0x58, "JO": 0x59, "JNO": 0x5A,
+    "PUSH": 0x60, "POP": 0x61,
+    "CALL": 0x70, "RET": 0x71,
+    "MOV": 0x80, "MOVFRSP": 0x81, "MOVTOSP": 0x82,
+    "HALT": 0xFF
 }
 
 REVERSE_OPCODES = {v: k for k, v in OPCODES.items()}
@@ -42,32 +43,35 @@ VALID_REGISTERS = set(REG_CODES.keys())
 
 # --- Instruction Formats ---
 INSTRUCTION_FORMATS = {
-    "NOP":   (1, []), "HALT":  (1, []), "RET":   (1, []), "LOAD":  (4, ['R', 'I16']),
-    "STORE": (4, ['R', 'A16']), "LOADM": (4, ['R', 'A16']), "LOADFR":(5, ['R', 'R', 'S16']),
-    "STORFR":(5, ['R', 'R', 'S16']), "LOADI": (3, ['R', 'R']), "STORI": (3, ['R', 'R']),
-    "LOADB": (4, ['R', 'A16']), "STORB": (4, ['R', 'A16']), "LOADIB":(3, ['R', 'R']),
-    "STORIB":(3, ['R', 'R']),
-    "INM":   (4, ['R', 'A16']), "OUTM":  (4, ['R', 'A16']), "ADD":   (3, ['R', 'R']),
-    "SUB":   (3, ['R', 'R']), "MUL":   (3, ['R', 'R']), "AND":   (3, ['R', 'R']),
-    "OR":    (3, ['R', 'R']), "XOR":   (3, ['R', 'R']), "CMP":   (3, ['R', 'R']),
-    "MOV":   (3, ['R', 'R']), "MOVFRSP": (2, ['R']), "MOVTOSP": (2, ['R']),
-    "INC":   (2, ['R']), "DEC":   (2, ['R']), "NOT":   (2, ['R']), "INP":   (2, ['R']),
-    "OUT":   (2, ['R']), "PUSH":  (2, ['R']), "POP":   (2, ['R']), "SHL":   (3, ['R', 'I8']),
-    "SHR":   (3, ['R', 'I8']), "L_AND": (4, ['R', 'R', 'R']), "L_or":  (4, ['R', 'R', 'R']),
-    "L_NOT": (3, ['R', 'R']), "JMP":   (3, ['A16']), "JE": (3, ['A16']), "JNE": (3, ['A16']),
-    "JS":    (3, ['A16']), "JNS": (3, ['A16']), "JC": (3, ['A16']), "JNC": (3, ['A16']),
-    "JO":    (3, ['A16']), "JNO": (3, ['A16']), "CALL":  (3, ['A16']),
-    "JMPZ":  (4, ['R', 'A16']), "JMPN":  (4, ['R', 'A16'])
+    "NOP": (1, []), "HALT": (1, []), "RET": (1, []), "LOAD": (4, ['R', 'I16']),
+    "STORE": (4, ['R', 'A16']), "LOADM": (4, ['R', 'A16']), "LOADFR": (5, ['R', 'R', 'S16']),
+    "STORFR": (5, ['R', 'R', 'S16']), "LOADI": (3, ['R', 'R']), "STORI": (3, ['R', 'R']),
+    "LOADB": (4, ['R', 'A16']), "STORB": (4, ['R', 'A16']), "LOADIB": (3, ['R', 'R']),
+    "STORIB": (3, ['R', 'R']),
+    # NEW: Frame-relative byte instructions
+    "LOADBFR": (5, ['R', 'R', 'S16']), "STORBFR": (5, ['R', 'R', 'S16']),
+
+    "INM": (4, ['R', 'A16']), "OUTM": (4, ['R', 'A16']), "ADD": (3, ['R', 'R']),
+    "SUB": (3, ['R', 'R']), "MUL": (3, ['R', 'R']), "AND": (3, ['R', 'R']),
+    "OR": (3, ['R', 'R']), "XOR": (3, ['R', 'R']), "CMP": (3, ['R', 'R']),
+    "MOV": (3, ['R', 'R']), "MOVFRSP": (2, ['R']), "MOVTOSP": (2, ['R']),
+    "INC": (2, ['R']), "DEC": (2, ['R']), "NOT": (2, ['R']), "INP": (2, ['R']),
+    "OUT": (2, ['R']), "PUSH": (2, ['R']), "POP": (2, ['R']), "SHL": (3, ['R', 'I8']),
+    "SHR": (3, ['R', 'I8']), "L_AND": (4, ['R', 'R', 'R']), "L_or": (4, ['R', 'R', 'R']),
+    "L_NOT": (3, ['R', 'R']), "JMP": (3, ['A16']), "JE": (3, ['A16']), "JNE": (3, ['A16']),
+    "JS": (3, ['A16']), "JNS": (3, ['A16']), "JC": (3, ['A16']), "JNC": (3, ['A16']),
+    "JO": (3, ['A16']), "JNO": (3, ['A16']), "CALL": (3, ['A16']),
+    "JMPZ": (4, ['R', 'A16']), "JMPN": (4, ['R', 'A16'])
 }
 
 # --- Value Constants ---
 MAX_IMMEDIATE_16BIT = 0xFFFF
-MAX_ADDRESS_16BIT   = 0xFFFF
-MAX_IMMEDIATE_8BIT  = 0xFF
+MAX_ADDRESS_16BIT = 0xFFFF
+MAX_IMMEDIATE_8BIT = 0xFF
 MIN_SIGNED_IMMEDIATE_16BIT = -32768
 MAX_SIGNED_IMMEDIATE_16BIT = 32767
 
 # --- Memory Layout Constants ---
-DEFAULT_MMIO_INPUT_ADDR  = 0x17FE
+DEFAULT_MMIO_INPUT_ADDR = 0x17FE
 DEFAULT_MMIO_OUTPUT_ADDR = 0x17FF
-GLOBAL_DATA_START_ADDR = 0x1000
+GLOBAL_DATA_START_ADDR = 0x0800
