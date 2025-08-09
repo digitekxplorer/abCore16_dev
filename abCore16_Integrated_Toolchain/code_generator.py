@@ -371,23 +371,33 @@ class SALCodeGenerator:
                 f"CodeGen Error: Initializer for '{node.var_name_node.name}' failed.")
             if not symbol_info: raise Exception(
                 f"CodeGen Internal Error: Symbol info for '{node.var_name_node.name}' not found.")
+
+
             if symbol_info['type'] == 'global':
-                if symbol_info['data_type'] == 'char' and not symbol_info['is_pointer']:
-                    self.emit(f"STORB {expr_val_reg}, #{symbol_info['loc']}")
+                if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
+                    self.emit(f"STORB {expr_val_reg}, 0x{symbol_info['loc']:04X}")  # Already correct
                 else:
-                    self.emit(f"STORE {expr_val_reg}, #{symbol_info['loc']}")
+                    self.emit(f"STORE {expr_val_reg}, 0x{symbol_info['loc']:04X}")  # FIXED - no # prefix
+
+
             elif symbol_info['type'] in ['local', 'local_array']:
-                self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+                if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
+                    self.emit(f"STORBFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+                else:
+                    self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+
             else:
                 raise Exception(
                     f"CodeGen: Cannot initialize VarDeclNode of unknown symbol type '{symbol_info['type']}'")
             if expr_val_reg in self._compiler_temp_pool_master: self._free_temp(expr_val_reg)
 
+
     def visit_CharLiteralNode(self, node):
-        reg = self._new_temp();
+        reg = self._new_temp()
         ascii_val = ord(node.value)
-        self.emit(f"LOAD {reg}, #{ascii_val} // Load char '{node.value}'");
+        self.emit(f"LOAD {reg}, #{ascii_val} // Load char (ASCII {ascii_val})")
         return reg
+
 
     def visit_ArrayAccessNode(self, node):
         addr_reg = self._generate_address_of_array_element(node);
@@ -419,20 +429,27 @@ class SALCodeGenerator:
                 self.emit(f"SUB {temp_reg}, {offset_reg}");
                 self._free_temp(offset_reg)
             return temp_reg
+
+
         if symbol_info['type'] == 'global':
             if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
-                self.emit(f"LOADB {temp_reg}, #{symbol_info['loc']}")
+                self.emit(f"LOADB {temp_reg}, 0x{symbol_info['loc']:04X}")  # Already correct
             else:
-                self.emit(f"LOADM {temp_reg}, #{symbol_info['loc']}")
+                self.emit(f"LOADM {temp_reg}, 0x{symbol_info['loc']:04X}")  # FIXED - no # prefix
+
         elif symbol_info['type'] in ['param', 'local']:
-            self.emit(f"LOADFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+            if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
+                self.emit(f"LOADBFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+            else:
+                self.emit(f"LOADFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+
+
         else:
             self._free_temp(temp_reg);
             raise Exception(
                 f"CodeGen Error: Unknown symbol type '{symbol_info['type']}' for '{node.name}' during lookup")
         return temp_reg
 
-    # --- THIS METHOD CONTAINS THE FIX ---
     def visit_AssignmentNode(self, node):
         target_node = node.target_name
         if isinstance(target_node, IdentifierNode):
@@ -457,13 +474,22 @@ class SALCodeGenerator:
             if expr_val_reg is None: raise Exception(f"RHS of assignment to '{target_node.name}' is invalid.")
             symbol_info = self._lookup_symbol(target_node.name)
             if not symbol_info: raise Exception(f"Assignment to undeclared variable '{target_node.name}'.")
+
+
             if symbol_info['type'] == 'global':
                 if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
-                    self.emit(f"STORB {expr_val_reg}, #{symbol_info['loc']}")
+                    self.emit(f"STORB {expr_val_reg}, 0x{symbol_info['loc']:04X}")  # Already correct
                 else:
-                    self.emit(f"STORE {expr_val_reg}, #{symbol_info['loc']}")
+                    self.emit(f"STORE {expr_val_reg}, 0x{symbol_info['loc']:04X}")  # FIXED - no # prefix
+
             elif symbol_info['type'] in ['param', 'local']:
-                self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+                if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
+                    self.emit(f"STORBFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+                else:
+                    self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
+
+
+
             else:
                 raise Exception(f"Invalid target symbol type '{symbol_info['type']}' for assignment.")
             self._free_temp(expr_val_reg)
