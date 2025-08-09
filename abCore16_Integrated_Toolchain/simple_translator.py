@@ -31,6 +31,12 @@ class SimpleTranslator:
             (re.compile(r"LOADIB\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "LOADIB {0}, {1}", ['R', 'R']),
             (re.compile(r"STORIB\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "STORIB {0}, {1}", ['R', 'R']),
 
+            # NEW: Frame-relative byte instructions
+            (re.compile(r"LOADBFR\s+(R[0-7])\s*,?\s*(R[0-7])\s*,?\s*([+-]?(?:0x[0-9a-fA-F]+|\d+))", re.IGNORECASE),
+             "LOADBFR {0}, {1}, #{2}", ['R', 'R', 'S16']),
+            (re.compile(r"STORBFR\s+(R[0-7])\s*,?\s*(R[0-7])\s*,?\s*([+-]?(?:0x[0-9a-fA-F]+|\d+))", re.IGNORECASE),
+             "STORBFR {0}, {1}, #{2}", ['R', 'R', 'S16']),
+
             # EXISTING INSTRUCTIONS
             (re.compile(r"LOADI\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "LOADI {0}, {1}", ['R', 'R']),
             (re.compile(r"STORI\s+(R[0-7])\s*,?\s*(R[0-7])", re.IGNORECASE), "STORI {0}, {1}", ['R', 'R']),
