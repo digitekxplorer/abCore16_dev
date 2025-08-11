@@ -1,5 +1,7 @@
 # microprocessor_simulator.py
 # FINAL CORRECTED VERSION with bytearray memory and char opcodes.
+# This version implements the hardware-accurate word-addressing scheme (address >> 1)
+# and the hardware-accurate little-endian data format for all memory access instructions.
 
 import sys
 from abcore16_defs import (
@@ -118,11 +120,10 @@ class MicroprocessorSimulator:
             self.output_log.append(f"Sim: ERR loading '{filepath}': {e}");
             return False
 
-
     def _handle_mmio_read(self, word_address):
         eff_addr = self._apply_16bit_limits(word_address)
         # DEBUG: Print every MMIO read attempt
-        print(f"DEBUG MMIO READ: addr=0x{eff_addr:04X}")
+        # print(f"DEBUG MMIO READ: addr=0x{eff_addr:04X}")
 
         if eff_addr == DEFAULT_MMIO_INPUT_ADDR:
             if self.sim_input_buffer is None:
@@ -142,35 +143,25 @@ class MicroprocessorSimulator:
 
         # === NEW MMIO PERIPHERAL SIMULATION ===
         elif eff_addr == 0x1812:  # ADDRESS_UART_STATUS
-            # Simulate UART status: TX FIFO ready (bit 0 = 1), no RX data available (bit 1 = 0)
-            uart_status = 0x0001  # TX FIFO ready
+            uart_status = 0x0001
             self.output_log.append(f"  MMIO Read UART_STATUS(0x{eff_addr:04X}h): Val=0x{uart_status:04X} (TX ready)")
             return uart_status
-
         elif eff_addr == 0x180C:  # ADDRESS_TIMER_STATUS
-            # Simulate timer status: timeout occurred (bit 0 = 1)
-            timer_status = 0x0001  # Timeout bit set
+            timer_status = 0x0001
             self.output_log.append(
                 f"  MMIO Read TIMER_STATUS(0x{eff_addr:04X}h): Val=0x{timer_status:04X} (timeout ready)")
             return timer_status
-
         elif eff_addr == 0x1818:  # ADDRESS_LED_CTRL
-            # Simulate LED control register - return current LED state
-            # For simulation, we'll alternate the 4th LED bit to show blinking behavior
             if not hasattr(self, '_sim_led_state'):
                 self._sim_led_state = 0x0000
-            # Toggle the 4th LED bit (bit 3) each time it's read to simulate blinking
             self._sim_led_state ^= 0x0008
             self.output_log.append(f"  MMIO Read LED_CTRL(0x{eff_addr:04X}h): Val=0x{self._sim_led_state:04X}")
             return self._sim_led_state
-
         elif eff_addr == 0x1816:  # ADDRESS_UART_RX_DATA
-            # Simulate UART RX data - return 0 (no data received)
             self.output_log.append(f"  MMIO Read UART_RX_DATA(0x{eff_addr:04X}h): Val=0x0000 (no data)")
             return 0x0000
         # === END NEW MMIO SIMULATION ===
 
-        # Default case: try to read from data memory or return 0 for unmapped addresses
         byte_address = eff_addr * 2
         if self._is_valid_data_memory_byte_address(byte_address + 1):
             low = self.data_memory[byte_address]
@@ -185,52 +176,37 @@ class MicroprocessorSimulator:
 
         if eff_addr == DEFAULT_MMIO_OUTPUT_ADDR:
             self.sim_last_output_value = val16
-
-            # EXISTING: Original numeric output line (preserved for compatibility)
             output_line = f"SIM MMIO OUTPUT (0x{eff_addr:04X}h): {val16}"
             print(output_line)
             self.mmio_output_lines.append(output_line)
-
-            # NEW: Additional character display for ASCII values
-            if 32 <= val16 <= 126:  # Printable ASCII characters
-                char_output = chr(val16)
-                print(f"CHAR OUTPUT: '{char_output}'")
-            elif val16 == 10:  # Newline character
-                print("CHAR OUTPUT: '\\n' (newline)")
-                print()  # Also print actual newline for visual effect
-            elif val16 == 13:  # Carriage return
+            if 32 <= val16 <= 126:
+                print(f"CHAR OUTPUT: '{chr(val16)}'")
+            elif val16 == 10:
+                print("CHAR OUTPUT: '\\n' (newline)"); print()
+            elif val16 == 13:
                 print("CHAR OUTPUT: '\\r' (carriage return)")
-            elif val16 == 9:  # Tab
+            elif val16 == 9:
                 print("CHAR OUTPUT: '\\t' (tab)")
-            elif val16 == 0:  # Null terminator
+            elif val16 == 0:
                 print("CHAR OUTPUT: '\\0' (null terminator)")
-            else:  # Other values
+            else:
                 print(f"CHAR OUTPUT: [non-printable ASCII {val16}]")
-
-            # EXISTING: Original log entry (preserved)
             self.output_log.append(f"  MMIO Write OUTPUT(0x{eff_addr:04X}h): Val=0x{val16:04X}")
 
         # === NEW MMIO PERIPHERAL WRITE SIMULATION ===
-        elif eff_addr == 0x1800:  # ADDRESS_TIMER_CTRL
+        elif eff_addr == 0x1800:
             self.output_log.append(f"  MMIO Write TIMER_CTRL(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-
-        elif eff_addr == 0x1802:  # ADDRESS_TIMER_PRESCALE
+        elif eff_addr == 0x1802:
             self.output_log.append(f"  MMIO Write TIMER_PRESCALE(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-
-        elif eff_addr == 0x1804:  # ADDRESS_TIMER_RELOAD_L
+        elif eff_addr == 0x1804:
             self.output_log.append(f"  MMIO Write TIMER_RELOAD_L(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-
-        elif eff_addr == 0x1806:  # ADDRESS_TIMER_RELOAD_H
+        elif eff_addr == 0x1806:
             self.output_log.append(f"  MMIO Write TIMER_RELOAD_H(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-
-        elif eff_addr == 0x180C:  # ADDRESS_TIMER_STATUS
+        elif eff_addr == 0x180C:
             self.output_log.append(f"  MMIO Write TIMER_STATUS(0x{eff_addr:04X}h): Val=0x{val16:04X} (clear timeout)")
-
-        elif eff_addr == 0x1810:  # ADDRESS_UART_CTRL
+        elif eff_addr == 0x1810:
             self.output_log.append(f"  MMIO Write UART_CTRL(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-
-        elif eff_addr == 0x1814:  # ADDRESS_UART_TX_DATA
-            # Simulate UART transmission - just log the data
+        elif eff_addr == 0x1814:
             char_output = ""
             if 32 <= val16 <= 126:
                 char_output = f" ('{chr(val16)}')"
@@ -239,22 +215,17 @@ class MicroprocessorSimulator:
             elif val16 == 13:
                 char_output = " ('\\r')"
             self.output_log.append(f"  MMIO Write UART_TX_DATA(0x{eff_addr:04X}h): Val=0x{val16:04X}{char_output}")
-
-        elif eff_addr == 0x1818:  # ADDRESS_LED_CTRL
+        elif eff_addr == 0x1818:
             self.output_log.append(f"  MMIO Write LED_CTRL(0x{eff_addr:04X}h): Val=0x{val16:04X}")
-            # Store the LED state for reads
             self._sim_led_state = val16
         # === END NEW MMIO WRITE SIMULATION ===
-
         else:
-            # EXISTING: All other MMIO handling (unchanged)
             byte_address = eff_addr * 2
             if self._is_valid_data_memory_byte_address(byte_address + 1):
                 self.data_memory[byte_address] = val16 & 0xFF
                 self.data_memory[byte_address + 1] = (val16 >> 8) & 0xFF
             else:
                 self.output_log.append(f"Sim WARN: MMIO Write unmapped addr 0x{eff_addr:04X}h. Ignored.")
-
 
     def execute_cycle(self):
         if self.halted: return False
@@ -274,99 +245,164 @@ class MicroprocessorSimulator:
             if opcode_str == "NOP":
                 self.output_log.append("  NOP executed.")
             elif opcode_str == "HALT":
-                self.halted, self.clean_halt = True, True; self.output_log.append("  HALT: CPU Halted by instruction.")
+                self.halted, self.clean_halt = True, True;
+                self.output_log.append("  HALT: CPU Halted by instruction.")
             elif opcode_str == "LOAD":
                 rd_code, imm16 = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
                 rd_name = self._get_reg_name(rd_code)
                 self.registers[rd_name] = self._apply_16bit_limits(imm16);
                 self._update_flags(self.registers[rd_name], "LOAD")
                 self.output_log.append(f"  LOAD: {rd_name} = #0x{imm16:04X}")
+
+
+            # =================================================================================
+            # ===== START OF CORRECTED MEMORY AND STACK ACCESS INSTRUCTIONS (PHASE 1 & 2) =====
+            # =================================================================================
+
             elif opcode_str == "STORE":
-                rs_code, word_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
+                rs_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
                 rs_name = self._get_reg_name(rs_code)
-                self._handle_mmio_write(word_addr, self.registers[rs_name])
-                self.output_log.append(
-                    f"  STORE: Mem[WORD:0x{word_addr:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
-            elif opcode_str == "LOADM":
-                rd_code, word_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
-                rd_name = self._get_reg_name(rd_code)
-                val = self._handle_mmio_read(word_addr);
-                self.registers[rd_name] = self._apply_16bit_limits(val);
-                self._update_flags(self.registers[rd_name], "LOADM")
-                self.output_log.append(f"  LOADM: {rd_name} = Mem[WORD:0x{word_addr:04X}h]")
+                word_addr = immediate_addr >> 1
+                byte_index = word_addr * 2
+                if not self._is_valid_data_memory_byte_address(byte_index + 1):
+                    if (
+                            word_addr == DEFAULT_MMIO_INPUT_ADDR or word_addr == DEFAULT_MMIO_OUTPUT_ADDR or 0x1800 <= word_addr <= 0x181F):
+                        self._handle_mmio_write(word_addr, self.registers[rs_name])
+                        self.output_log.append(
+                            f"  STORE: MMIO[WORD:0x{word_addr:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
+                    else:
+                        raise ValueError(f"STORE: Invalid memory word address 0x{word_addr:04X}")
+                else:
+                    val16 = self._apply_16bit_limits(self.registers[rs_name])
+                    # LITTLE-ENDIAN store
+                    self.data_memory[byte_index] = val16 & 0xFF
+                    self.data_memory[byte_index + 1] = (val16 >> 8) & 0xFF
+                    self.output_log.append(
+                        f"  STORE: Mem[WORD:0x{word_addr:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
+
             elif opcode_str == "LOADB":
-                rd_code, byte_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
+                rd_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
                 rd_name = self._get_reg_name(rd_code)
-                if not self._is_valid_data_memory_byte_address(byte_addr): raise ValueError(
-                    f"LOADB: Invalid byte address 0x{byte_addr:04X}")
-                val = self.data_memory[byte_addr];
+                word_addr = immediate_addr >> 1
+                byte_select = immediate_addr & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"LOADB: Invalid memory byte address 0x{immediate_addr:04X}")
+                val = self.data_memory[byte_index]
                 self.registers[rd_name] = self._apply_16bit_limits(val)
-                self._update_flags(self.registers[rd_name], "LOADB");
-                self.output_log.append(f"  LOADB: {rd_name} = Mem[BYTE:0x{byte_addr:04X}]")
+                self._update_flags(self.registers[rd_name], "LOADB")
+                self.output_log.append(f"  LOADB: {rd_name} = Mem[BYTE:0x{immediate_addr:04X}] = 0x{val:02X}")
+
             elif opcode_str == "STORB":
-                rs_code, byte_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
+                rs_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
                 rs_name = self._get_reg_name(rs_code)
-                if not self._is_valid_data_memory_byte_address(byte_addr): raise ValueError(
-                    f"STORB: Invalid byte address 0x{byte_addr:04X}")
-                self.data_memory[byte_addr] = self.registers[rs_name] & 0xFF
-                self.output_log.append(f"  STORB: Mem[BYTE:0x{byte_addr:04X}] = {rs_name}")
-            elif opcode_str == "LOADIB":
-                rd_code, ra_code = self._fetch_byte_from_program(), self._fetch_byte_from_program();
-                rd_name, ra_name = self._get_reg_name(rd_code), self._get_reg_name(ra_code)
-                byte_addr = self.registers[ra_name]
-                if not self._is_valid_data_memory_byte_address(byte_addr): raise ValueError(
-                    f"LOADIB: Invalid byte address 0x{byte_addr:04X}")
-                val = self.data_memory[byte_addr];
+                word_addr = immediate_addr >> 1
+                byte_select = immediate_addr & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"STORB: Invalid memory byte address 0x{immediate_addr:04X}")
+                self.data_memory[byte_index] = self.registers[rs_name] & 0xFF
+                self.output_log.append(
+                    f"  STORB: Mem[BYTE:0x{immediate_addr:04X}] = {rs_name}(0x{self.registers[rs_name] & 0xFF:02X})")
+
+            elif opcode_str == "LOADM":
+                rd_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
+                rd_name = self._get_reg_name(rd_code)
+                word_addr = immediate_addr >> 1
+                byte_index = word_addr * 2
+                val = 0
+                if not self._is_valid_data_memory_byte_address(byte_index + 1):
+                    if (
+                            word_addr == DEFAULT_MMIO_INPUT_ADDR or word_addr == DEFAULT_MMIO_OUTPUT_ADDR or 0x1800 <= word_addr <= 0x181F):
+                        val = self._handle_mmio_read(word_addr)
+                        self.output_log.append(f"  LOADM: {rd_name} = MMIO[WORD:0x{word_addr:04X}h]")
+                    else:
+                        raise ValueError(f"LOADM: Invalid memory word address 0x{word_addr:04X}")
+                else:
+                    # LITTLE-ENDIAN read
+                    low = self.data_memory[byte_index]
+                    high = self.data_memory[byte_index + 1]
+                    val = (high << 8) | low
+                    self.output_log.append(f"  LOADM: {rd_name} = Mem[WORD:0x{word_addr:04X}h]")
                 self.registers[rd_name] = self._apply_16bit_limits(val)
-                self._update_flags(self.registers[rd_name], "LOADIB");
-                self.output_log.append(f"  LOADIB: {rd_name} = Mem[{ra_name}(BYTE:0x{byte_addr:04X})]")
+                self._update_flags(self.registers[rd_name], "LOADM")
+
+            elif opcode_str == "LOADIB":
+                rd_code, ra_code = self._fetch_byte_from_program(), self._fetch_byte_from_program()
+                rd_name, ra_name = self._get_reg_name(rd_code), self._get_reg_name(ra_code)
+                address_from_reg = self.registers[ra_name]
+                word_addr = address_from_reg >> 1
+                byte_select = address_from_reg & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"LOADIB: Invalid address 0x{address_from_reg:04X}")
+                val = self.data_memory[byte_index]
+                self.registers[rd_name] = self._apply_16bit_limits(val)
+                self._update_flags(self.registers[rd_name], "LOADIB")
+                self.output_log.append(f"  LOADIB: {rd_name} = Mem[{ra_name}(BYTE:0x{address_from_reg:04X})]")
+
             elif opcode_str == "STORIB":
-                rt_code, ra_code = self._fetch_byte_from_program(), self._fetch_byte_from_program();
+                rt_code, ra_code = self._fetch_byte_from_program(), self._fetch_byte_from_program()
                 rt_name, ra_name = self._get_reg_name(rt_code), self._get_reg_name(ra_code)
-                byte_addr = self.registers[ra_name]
-                if not self._is_valid_data_memory_byte_address(byte_addr): raise ValueError(
-                    f"STORIB: Invalid byte address 0x{byte_addr:04X}")
-                self.data_memory[byte_addr] = self.registers[rt_name] & 0xFF
-                self.output_log.append(f"  STORIB: Mem[{ra_name}(BYTE:0x{byte_addr:04X})] = {rt_name}")
+                address_from_reg = self.registers[ra_name]
+                word_addr = address_from_reg >> 1
+                byte_select = address_from_reg & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"STORIB: Invalid address 0x{address_from_reg:04X}")
+                self.data_memory[byte_index] = self.registers[rt_name] & 0xFF
+                self.output_log.append(f"  STORIB: Mem[{ra_name}(BYTE:0x{address_from_reg:04X})] = {rt_name}")
+
             elif opcode_str == "LOADFR":
                 rd_code, rbase_code, s_offset16 = self._fetch_byte_from_program(), self._fetch_byte_from_program(), self._fetch_signed_word_le_from_program()
-                rd_name, rbase_name = self._get_reg_name(rd_code), self._get_reg_name(rbase_code);
+                rd_name, rbase_name = self._get_reg_name(rd_code), self._get_reg_name(rbase_code)
                 base_addr_val = self.registers[rbase_name]
                 eff_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-                if not self._is_valid_data_memory_byte_address(eff_addr + 1): raise ValueError(
-                    f"LOADFR: Invalid memory access at byte addr 0x{eff_addr:04X}")
-                low, high = self.data_memory[eff_addr], self.data_memory[eff_addr + 1];
+                word_addr = eff_addr >> 1
+                byte_index = word_addr * 2
+                if not self._is_valid_data_memory_byte_address(byte_index + 1):
+                    raise ValueError(f"LOADFR: Invalid memory access at effective address 0x{eff_addr:04X}")
+                # LITTLE-ENDIAN read
+                low = self.data_memory[byte_index]
+                high = self.data_memory[byte_index + 1]
                 val = (high << 8) | low
-                self.registers[rd_name] = self._apply_16bit_limits(val);
+                self.registers[rd_name] = self._apply_16bit_limits(val)
                 self._update_flags(self.registers[rd_name], "LOADFR")
                 self.output_log.append(
-                    f"  LOADFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => 0x{eff_addr:04X}]")
+                    f"  LOADFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => WORD:0x{word_addr:04X}]")
+
             elif opcode_str == "STORFR":
                 rt_code, rbase_code, s_offset16 = self._fetch_byte_from_program(), self._fetch_byte_from_program(), self._fetch_signed_word_le_from_program()
-                rt_name, rbase_name = self._get_reg_name(rt_code), self._get_reg_name(rbase_code);
+                rt_name, rbase_name = self._get_reg_name(rt_code), self._get_reg_name(rbase_code)
                 val_to_store = self.registers[rt_name]
-                base_addr_val = self.registers[rbase_name];
+                base_addr_val = self.registers[rbase_name]
                 eff_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-                if not self._is_valid_data_memory_byte_address(eff_addr + 1): raise ValueError(
-                    f"STORFR: Invalid memory access at byte addr 0x{eff_addr:04X}")
+                word_addr = eff_addr >> 1
+                byte_index = word_addr * 2
+                if not self._is_valid_data_memory_byte_address(byte_index + 1):
+                    raise ValueError(f"STORFR: Invalid memory access at effective address 0x{eff_addr:04X}")
                 val16 = self._apply_16bit_limits(val_to_store)
-                self.data_memory[eff_addr] = val16 & 0xFF;
-                self.data_memory[eff_addr + 1] = (val16 >> 8) & 0xFF
+                # LITTLE-ENDIAN store
+                self.data_memory[byte_index] = val16 & 0xFF
+                self.data_memory[byte_index + 1] = (val16 >> 8) & 0xFF
                 self.output_log.append(
-                    f"  STORFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => 0x{eff_addr:04X}] = {rt_name}")
-
+                    f"  STORFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => WORD:0x{word_addr:04X}] = {rt_name}")
 
             elif opcode_str == "LOADBFR":
                 rd_code, rbase_code, s_offset16 = self._fetch_byte_from_program(), self._fetch_byte_from_program(), self._fetch_signed_word_le_from_program()
                 rd_name, rbase_name = self._get_reg_name(rd_code), self._get_reg_name(rbase_code)
                 base_addr_val = self.registers[rbase_name]
                 eff_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-                if not self._is_valid_data_memory_byte_address(eff_addr):
-                    raise ValueError(f"LOADBFR: Invalid byte address 0x{eff_addr:04X}")
-                val = self.data_memory[eff_addr]
+                word_addr = eff_addr >> 1
+                byte_select = eff_addr & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"LOADBFR: Invalid effective byte address 0x{eff_addr:04X}")
+                val = self.data_memory[byte_index]
                 self.registers[rd_name] = self._apply_16bit_limits(val)
                 self._update_flags(self.registers[rd_name], "LOADBFR")
-                self.output_log.append(f"  LOADBFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => BYTE:0x{eff_addr:04X}] = 0x{val:02X}")
+                self.output_log.append(
+                    f"  LOADBFR: {rd_name} = Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => BYTE:0x{eff_addr:04X}] = 0x{val:02X}")
 
             elif opcode_str == "STORBFR":
                 rt_code, rbase_code, s_offset16 = self._fetch_byte_from_program(), self._fetch_byte_from_program(), self._fetch_signed_word_le_from_program()
@@ -374,86 +410,59 @@ class MicroprocessorSimulator:
                 val_to_store = self.registers[rt_name]
                 base_addr_val = self.registers[rbase_name]
                 eff_addr = self._apply_16bit_limits(base_addr_val + s_offset16)
-                if not self._is_valid_data_memory_byte_address(eff_addr):
-                    raise ValueError(f"STORBFR: Invalid byte address 0x{eff_addr:04X}")
-                self.data_memory[eff_addr] = val_to_store & 0xFF
-                self.output_log.append(f"  STORBFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => BYTE:0x{eff_addr:04X}] = {rt_name}(0x{val_to_store & 0xFF:02X})")
+                word_addr = eff_addr >> 1
+                byte_select = eff_addr & 1
+                byte_index = (word_addr * 2) + byte_select
+                if not self._is_valid_data_memory_byte_address(byte_index):
+                    raise ValueError(f"STORBFR: Invalid effective byte address 0x{eff_addr:04X}")
+                self.data_memory[byte_index] = val_to_store & 0xFF
+                self.output_log.append(
+                    f"  STORBFR: Mem[{rbase_name}(0x{base_addr_val:04X}) + #{s_offset16} => BYTE:0x{eff_addr:04X}] = {rt_name}(0x{val_to_store & 0xFF:02X})")
 
-
-            # handles memory-mapped IO access
             elif opcode_str == "LOADI":
-                print("DEBUG: NEW LOADI CODE IS RUNNING!")  # This should appear in output
-
                 rd_code, rs_addr_code = self._fetch_byte_from_program(), self._fetch_byte_from_program()
                 rd_name, rs_addr_name = self._get_reg_name(rd_code), self._get_reg_name(rs_addr_code)
-                byte_address = self.registers[rs_addr_name]
-
-                print(f"DEBUG: LOADI byte_address=0x{byte_address:04X}")  # Debug the address
-
-                # CORRECTED: Check if the byte address itself is an MMIO address
-                is_mmio_address = (
-                        byte_address == DEFAULT_MMIO_INPUT_ADDR or
-                        byte_address == DEFAULT_MMIO_OUTPUT_ADDR or
-                        0x1800 <= byte_address <= 0x181F  # MMIO peripheral range (direct comparison)
-                )
-
-                print(f"DEBUG: is_mmio_address={is_mmio_address}")  # Debug MMIO check
-
-                if is_mmio_address:
-                    print("DEBUG: Calling MMIO handler with byte_address!")
-                    # Handle as MMIO - pass the byte address directly to MMIO handler
-                    val = self._handle_mmio_read(byte_address)
-                    self.output_log.append(f"  LOADI: {rd_name} = MMIO[0x{byte_address:04X}h] = 0x{val:04X}")
-                elif self._is_valid_data_memory_byte_address(byte_address) and \
-                        self._is_valid_data_memory_byte_address(byte_address + 1):
-                    print("DEBUG: Reading from data memory")
-                    # Read directly from data memory as a word (little-endian)
-                    low = self.data_memory[byte_address]
-                    high = self.data_memory[byte_address + 1]
+                address_from_reg = self.registers[rs_addr_name]
+                word_addr = address_from_reg >> 1
+                byte_index = word_addr * 2
+                val = 0
+                if (
+                        word_addr == DEFAULT_MMIO_INPUT_ADDR or word_addr == DEFAULT_MMIO_OUTPUT_ADDR or 0x1800 <= word_addr <= 0x181F):
+                    val = self._handle_mmio_read(word_addr)
+                    self.output_log.append(f"  LOADI: {rd_name} = MMIO[WORD:0x{word_addr:04X}h]")
+                elif self._is_valid_data_memory_byte_address(byte_index + 1):
+                    # LITTLE-ENDIAN read
+                    low = self.data_memory[byte_index]
+                    high = self.data_memory[byte_index + 1]
                     val = (high << 8) | low
                     self.output_log.append(
-                        f"  LOADI: {rd_name} = Mem[{rs_addr_name}(ADDR:0x{byte_address:04X})] = 0x{val:04X}")
+                        f"  LOADI: {rd_name} = Mem[{rs_addr_name}(WORD:0x{word_addr:04X})] = 0x{val:04X}")
                 else:
-                    print("DEBUG: Invalid address")
-                    # Invalid address
-                    raise ValueError(f"LOADI: Invalid address 0x{byte_address:04X}")
-
+                    raise ValueError(f"LOADI: Invalid address 0x{address_from_reg:04X} (Word Addr 0x{word_addr:04X})")
                 self.registers[rd_name] = self._apply_16bit_limits(val)
                 self._update_flags(self.registers[rd_name], "LOADI")
 
-
-            # handles memory-mapped IO access
             elif opcode_str == "STORI":
                 rt_val_code, rs_addr_code = self._fetch_byte_from_program(), self._fetch_byte_from_program()
                 rt_val_name, rs_addr_name = self._get_reg_name(rt_val_code), self._get_reg_name(rs_addr_code)
-                byte_address = self.registers[rs_addr_name]
+                address_from_reg = self.registers[rs_addr_name]
                 val_to_store = self.registers[rt_val_name]
-
-                # Check if this is an MMIO address first (same logic as LOADI)
-                is_mmio_address = (
-                        byte_address == DEFAULT_MMIO_INPUT_ADDR or
-                        byte_address == DEFAULT_MMIO_OUTPUT_ADDR or
-                        0x1800 <= byte_address <= 0x181F  # MMIO peripheral range
-                )
-
-                if is_mmio_address:
-                    # Handle as MMIO
-                    self._handle_mmio_write(byte_address, val_to_store)
+                word_addr = address_from_reg >> 1
+                byte_index = word_addr * 2
+                if (
+                        word_addr == DEFAULT_MMIO_INPUT_ADDR or word_addr == DEFAULT_MMIO_OUTPUT_ADDR or 0x1800 <= word_addr <= 0x181F):
+                    self._handle_mmio_write(word_addr, val_to_store)
                     self.output_log.append(
-                        f"  STORI: MMIO[0x{byte_address:04X}h] = {rt_val_name}(0x{val_to_store:04X})")
-                elif self._is_valid_data_memory_byte_address(byte_address) and \
-                        self._is_valid_data_memory_byte_address(byte_address + 1):
-                    # Write directly to data memory as a word (little-endian)
+                        f"  STORI: MMIO[WORD:0x{word_addr:04X}h] = {rt_val_name}(0x{val_to_store:04X})")
+                elif self._is_valid_data_memory_byte_address(byte_index + 1):
                     val16 = self._apply_16bit_limits(val_to_store)
-                    self.data_memory[byte_address] = val16 & 0xFF
-                    self.data_memory[byte_address + 1] = (val16 >> 8) & 0xFF
+                    # LITTLE-ENDIAN store
+                    self.data_memory[byte_index] = val16 & 0xFF
+                    self.data_memory[byte_index + 1] = (val16 >> 8) & 0xFF
                     self.output_log.append(
-                        f"  STORI: Mem[{rs_addr_name}(ADDR:0x{byte_address:04X})] = {rt_val_name}(0x{val_to_store:04X})")
+                        f"  STORI: Mem[{rs_addr_name}(WORD:0x{word_addr:04X})] = {rt_val_name}(0x{val_to_store:04X})")
                 else:
-                    # Invalid address
-                    raise ValueError(f"STORI: Invalid address 0x{byte_address:04X}")
-
-
+                    raise ValueError(f"STORI: Invalid address 0x{address_from_reg:04X} (Word Addr 0x{word_addr:04X})")
 
             elif opcode_str == "MOVFRSP":
                 rd_code = self._fetch_byte_from_program();
@@ -467,6 +476,7 @@ class MicroprocessorSimulator:
                 self.sp = self._apply_16bit_limits(self.registers[rs_name])
                 self.output_log.append(
                     f"  MOVTOSP: SP = {rs_name}(0x{self.registers[rs_name]:04X}). New SP=0x{self.sp:04X}h")
+
             elif opcode_str == "INP":
                 rd_code = self._fetch_byte_from_program();
                 rd_name = self._get_reg_name(rd_code);
@@ -479,19 +489,31 @@ class MicroprocessorSimulator:
                 rs_name = self._get_reg_name(rs_code)
                 self._handle_mmio_write(DEFAULT_MMIO_OUTPUT_ADDR, self.registers[rs_name])
                 self.output_log.append(f"  OUT: Value from {rs_name}(0x{self.registers[rs_name]:04X})")
+
             elif opcode_str == "INM":
-                rd_code, addr16 = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
+                rd_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
                 rd_name = self._get_reg_name(rd_code)
-                val = self._handle_mmio_read(addr16);
-                self.registers[rd_name] = self._apply_16bit_limits(val);
+                word_addr = immediate_addr >> 1
+                if immediate_addr % 2 != 0:
+                    self.output_log.append(
+                        f"Sim WARN: INM from unaligned address 0x{immediate_addr:04X}. Using word addr 0x{word_addr:04X}.")
+                val = self._handle_mmio_read(word_addr)
+                self.registers[rd_name] = self._apply_16bit_limits(val)
                 self._update_flags(self.registers[rd_name], "INM")
                 self.output_log.append(
-                    f"  INM: {rd_name} = Mem[0x{addr16:04X}] (Value=0x{self.registers[rd_name]:04X})")
+                    f"  INM: {rd_name} = Mem[0x{immediate_addr:04X}] (Value=0x{self.registers[rd_name]:04X})")
+
             elif opcode_str == "OUTM":
-                rs_code, addr16 = self._fetch_byte_from_program(), self._fetch_word_le_from_program();
+                rs_code, immediate_addr = self._fetch_byte_from_program(), self._fetch_word_le_from_program()
                 rs_name = self._get_reg_name(rs_code)
-                self._handle_mmio_write(addr16, self.registers[rs_name]);
-                self.output_log.append(f"  OUTM: Mem[0x{addr16:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
+                word_addr = immediate_addr >> 1
+                if immediate_addr % 2 != 0:
+                    self.output_log.append(
+                        f"Sim WARN: OUTM to unaligned address 0x{immediate_addr:04X}. Using word addr 0x{word_addr:04X}.")
+                self._handle_mmio_write(word_addr, self.registers[rs_name])
+                self.output_log.append(
+                    f"  OUTM: Mem[0x{immediate_addr:04X}h] = {rs_name}(0x{self.registers[rs_name]:04X})")
+
             elif opcode_str == "ADD":
                 r1, r2 = self._fetch_byte_from_program(), self._fetch_byte_from_program();
                 n1, n2 = self._get_reg_name(r1), self._get_reg_name(r2)
@@ -593,56 +615,75 @@ class MicroprocessorSimulator:
                 self.registers[n1] = self.registers[n2];
                 self._update_flags(self.registers[n1], "MOV");
                 self.output_log.append(f"  MOV:{n1}={n2}(0x{self.registers[n1]:04X})")
+
             elif opcode_str == "PUSH":
-                rs_code = self._fetch_byte_from_program();
+                rs_code = self._fetch_byte_from_program()
                 rs_name = self._get_reg_name(rs_code)
-                if self.sp < self.stack_limit: raise ValueError(
-                    f"Stack Overflow on PUSH. SP(0x{self.sp:04X}h) at/below Limit(0x{self.stack_limit:04X}h).")
-                if not self._is_valid_data_memory_byte_address(self.sp + 1): raise ValueError(
-                    f"PUSH: Invalid SP 0x{self.sp:04X}h before store.")
-                val_to_push = self.registers[rs_name];
+                if self.sp < self.stack_limit:
+                    raise ValueError(
+                        f"Stack Overflow on PUSH. SP(0x{self.sp:04X}h) at/below Limit(0x{self.stack_limit:04X}h).")
+                if not self._is_valid_data_memory_byte_address(self.sp + 1):
+                    raise ValueError(f"PUSH: Invalid SP 0x{self.sp:04X}h before store.")
+                val_to_push = self.registers[rs_name]
                 val16 = self._apply_16bit_limits(val_to_push)
-                self.data_memory[self.sp] = val16 & 0xFF;
+                # LITTLE-ENDIAN store for stack
+                self.data_memory[self.sp] = val16 & 0xFF
                 self.data_memory[self.sp + 1] = (val16 >> 8) & 0xFF
                 self.output_log.append(f"  PUSH: {rs_name}(0x{val_to_push:04X}) to Mem[SP=0x{self.sp:04X}h].")
                 self.sp = (self.sp - 2) & MAX_ADDRESS_16BIT
+
             elif opcode_str == "POP":
-                rd_code = self._fetch_byte_from_program();
+                rd_code = self._fetch_byte_from_program()
                 rd_name = self._get_reg_name(rd_code)
                 new_sp = (self.sp + 2) & MAX_ADDRESS_16BIT
-                if new_sp > self.stack_base: raise ValueError(f"Stack Underflow on POP. SP would be > base.")
+                if new_sp > self.stack_base:
+                    raise ValueError("Stack Underflow on POP. SP would be > base.")
                 self.sp = new_sp
-                if not self._is_valid_data_memory_byte_address(self.sp + 1): raise ValueError(
-                    f"POP: Invalid SP 0x{self.sp:04X}h after increment.")
-                low, high = self.data_memory[self.sp], self.data_memory[self.sp + 1];
+                if not self._is_valid_data_memory_byte_address(self.sp + 1):
+                    raise ValueError(f"POP: Invalid SP 0x{self.sp:04X}h after increment.")
+                # LITTLE-ENDIAN read for stack
+                low = self.data_memory[self.sp]
+                high = self.data_memory[self.sp + 1]
                 val_popped = (high << 8) | low
-                self.registers[rd_name] = self._apply_16bit_limits(val_popped);
+                self.registers[rd_name] = self._apply_16bit_limits(val_popped)
                 self._update_flags(self.registers[rd_name], "POP")
                 self.output_log.append(f"  POP: {rd_name} = Mem[SP=0x{self.sp:04X}h] (Val=0x{val_popped:04X}).")
+
             elif opcode_str == "CALL":
-                target_addr16 = self._fetch_word_le_from_program();
+                target_addr16 = self._fetch_word_le_from_program()
                 ret_addr = self.program_counter
-                if self.sp < self.stack_limit: raise ValueError("Stack Overflow on CALL for return address.")
-                if not self._is_valid_data_memory_byte_address(self.sp + 1): raise ValueError(
-                    "CALL: Invalid SP for ret_addr push.")
+                if self.sp < self.stack_limit:
+                    raise ValueError("Stack Overflow on CALL for return address.")
+                if not self._is_valid_data_memory_byte_address(self.sp + 1):
+                    raise ValueError("CALL: Invalid SP for ret_addr push.")
                 ret16 = self._apply_16bit_limits(ret_addr)
-                self.data_memory[self.sp] = ret16 & 0xFF;
+                # LITTLE-ENDIAN store for stack
+                self.data_memory[self.sp] = ret16 & 0xFF
                 self.data_memory[self.sp + 1] = (ret16 >> 8) & 0xFF
                 self.output_log.append(
                     f"  CALL: Pushed RetAddr(0x{ret_addr:04X}h) to Stack[SP=0x{self.sp:04X}h]. JMP to 0x{target_addr16:04X}h.")
-                self.sp = (self.sp - 2) & MAX_ADDRESS_16BIT;
+                self.sp = (self.sp - 2) & MAX_ADDRESS_16BIT
                 self.program_counter = self._apply_16bit_limits(target_addr16)
+
             elif opcode_str == "RET":
                 new_sp = (self.sp + 2) & MAX_ADDRESS_16BIT
-                if new_sp > self.stack_base: raise ValueError("Stack Underflow on RET.")
+                if new_sp > self.stack_base:
+                    raise ValueError("Stack Underflow on RET.")
                 self.sp = new_sp
-                if not self._is_valid_data_memory_byte_address(self.sp + 1): raise ValueError(
-                    "RET: Invalid SP for ret_addr pop.")
-                low, high = self.data_memory[self.sp], self.data_memory[self.sp + 1];
+                if not self._is_valid_data_memory_byte_address(self.sp + 1):
+                    raise ValueError("RET: Invalid SP for ret_addr pop.")
+                # LITTLE-ENDIAN read for stack
+                low = self.data_memory[self.sp]
+                high = self.data_memory[self.sp + 1]
                 ret_addr_from_stack = (high << 8) | low
                 self.program_counter = self._apply_16bit_limits(ret_addr_from_stack)
                 self.output_log.append(
                     f"  RET: Popped RetAddr(0x{self.program_counter:04X}h) from Stack[SP=0x{self.sp:04X}h]. JMP.")
+
+            # ===============================================================================
+            # ===== END OF CORRECTED MEMORY AND STACK ACCESS INSTRUCTIONS (PHASE 1 & 2) =====
+            # ===============================================================================
+
             elif opcode_str.startswith("J"):
                 is_reg_cond_jmp = opcode_str in ["JMPZ", "JMPN"]
                 reg_c = self._fetch_byte_from_program() if is_reg_cond_jmp else None
