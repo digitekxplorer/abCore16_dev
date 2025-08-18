@@ -1,4 +1,7 @@
 # simple_assembler.py
+# FINAL CORRECTED VERSION: The second pass is now capable of resolving
+# labels as immediate values for instructions like LOAD.
+
 import re
 import os
 from abcore16_defs import (
@@ -17,7 +20,6 @@ class SimpleAssembler:
         self.sal_listing_data = []
 
     def _get_instruction_byte_length(self, opcode_str):
-        # ... (same as your last working version) ...
         opcode_str_upper = opcode_str.upper()
         if opcode_str_upper not in OPCODES: return 0
         if opcode_str_upper in INSTRUCTION_FORMATS:
@@ -27,7 +29,6 @@ class SimpleAssembler:
         return 0
 
     def _preprocess_line(self, line_text_raw):
-        # ... (same as your last working version) ...
         line_text = line_text_raw.split('//', 1)[0]
         line_text = line_text.split(';', 1)[0]
         return line_text.strip()
@@ -37,8 +38,6 @@ class SimpleAssembler:
                        expect_immediate_8bit=False, expect_immediate_16bit=False,
                        expect_address_16bit=False, expect_label=False,
                        expect_signed_immediate_16bit=False):
-        # ... (This entire method should be the same as your last working version that correctly handles S16) ...
-        # For brevity, I'm using the one from the "ISA Changes Part B" step.
         operand_str_for_parsing = operand_str_raw.strip()
         operand_str_upper = operand_str_for_parsing.upper()
         is_hash_prefixed = operand_str_for_parsing.startswith('#')
@@ -91,7 +90,8 @@ class SimpleAssembler:
                 f"{type_err_str.capitalize()} '{operand_str_raw}' for {current_opcode_str} should NOT start with '#'."); return None
         else:
             self.errors.append(
-                f"Internal parse error: No specific numeric expectation for '{operand_str_raw}'."); return None
+                f"Internal parse error: No specific numeric expectation for '{operand_str_raw}'.");
+            return None
 
         base_parse = 10;
         num_str_to_parse = num_cand_str
@@ -101,7 +101,7 @@ class SimpleAssembler:
         elif num_cand_str.upper().startswith("-0X"):
             if expect_signed_immediate_16bit: self.errors.append(
                 f"Negative hex for {type_err_str} ('{operand_str_raw}') not supported; use decimal."); return None
-            base_parse = 16  # Let int() fail
+            base_parse = 16
         try:
             val_parsed = int(num_str_to_parse, base_parse)
             if not (min_val <= val_parsed <= max_val):
@@ -114,7 +114,6 @@ class SimpleAssembler:
             return None
 
     def first_pass(self, sal_code_lines):
-        # ... (same as your last working version) ...
         self.symbol_table = {};
         self.current_byte_offset = 0;
         self.errors = [];
@@ -141,7 +140,8 @@ class SimpleAssembler:
                 if instr_m:
                     op_s = instr_m.group(1).upper()
                     if op_s not in OPCODES:
-                        self.errors.append(f"L{idx + 1}: Unknown opcode '{op_s}'"); instr_len = 0
+                        self.errors.append(f"L{idx + 1}: Unknown opcode '{op_s}'");
+                        instr_len = 0
                     else:
                         instr_len = self._get_instruction_byte_length(op_s)
                     if instr_len == 0 and op_s in OPCODES: self.errors.append(
@@ -149,15 +149,13 @@ class SimpleAssembler:
                     self.sal_listing_data.append((addr_lst, orig_ln, proc_ln))
                     if instr_len > 0: self.current_byte_offset += instr_len
                 else:
-                    self.errors.append(f"L{idx + 1}: Unrecognized syntax: '{proc_ln}'"); self.sal_listing_data.append(
+                    self.errors.append(f"L{idx + 1}: Unrecognized syntax: '{proc_ln}'");
+                    self.sal_listing_data.append(
                         (-1, orig_ln, proc_ln))
         return not self.errors
 
+    # --- MODIFIED FOR INTERRUPT SUPPORT: This method is now smarter about labels ---
     def second_pass(self, sal_code_lines_ignored=None):
-        # ... (This entire method should be the same as your last working version that correctly handles S16 in _parse_operand
-        # and encoding S16 values) ...
-        # The logic for MOVFRSP and MOVTOSP will be naturally handled because INSTRUCTION_FORMATS
-        # defines them as taking one 'R' operand, which is already parsed and encoded correctly.
         self.machine_code = []
         for addr_pass1, original_line, processed_line in self.sal_listing_data:
             if addr_pass1 == -1 or not processed_line or re.fullmatch(r"([a-zA-Z_0-9]+):", processed_line,
@@ -180,27 +178,54 @@ class SimpleAssembler:
             for i, op_type_exp in enumerate(operand_sig_types):
                 raw_op_str = raw_ops[i];
                 val = None
+
+                # Check if the operand is a label that needs to be resolved.
+                op_body = raw_op_str.lstrip('#')
+                is_potential_label = False
+                try:
+                    int(op_body, 16 if op_body.upper().startswith('0X') else 10)
+                except ValueError:
+                    is_potential_label = True
+
                 if op_type_exp == 'R':
                     val = self._parse_operand(raw_op_str, opcode_str, expect_register=True)
-                elif op_type_exp == 'I16':
-                    val = self._parse_operand(raw_op_str, opcode_str, expect_immediate_16bit=True)
-                elif op_type_exp == 'I8':
-                    val = self._parse_operand(raw_op_str, opcode_str, expect_immediate_8bit=True)
-                elif op_type_exp == 'S16':
-                    val = self._parse_operand(raw_op_str, opcode_str, expect_signed_immediate_16bit=True)
-                elif op_type_exp == 'A16':
+
+                elif op_type_exp in ['I16', 'S16', 'I8'] and is_potential_label:
+                    if not raw_op_str.startswith('#'):
+                        self.errors.append(
+                            f"{error_context_msg}: Immediate value '{raw_op_str}' for {opcode_str} must start with '#'.")
+                        line_err = True;
+                        break
+
+                    label_name = op_body.upper()
+                    if label_name in self.symbol_table:
+                        val = self.symbol_table[label_name]
+                    else:
+                        self.errors.append(f"{error_context_msg}: Undefined label '{label_name}' used as immediate.")
+                        line_err = True;
+                        break
+
+                elif op_type_exp == 'A16' and is_potential_label:
                     is_jmp_call = opcode_str.startswith("J") or opcode_str == "CALL"
-                    if is_jmp_call and not (
-                            raw_op_str.startswith("#") or raw_op_str.upper().startswith("0X") or raw_op_str.isdigit()):
-                        lbl_name = self._parse_operand(raw_op_str, opcode_str, expect_label=True)
-                        if lbl_name:
-                            if lbl_name not in self.symbol_table: self.errors.append(
-                                f"{error_context_msg}: Undefined label '{lbl_name}'."); line_err = True; break
-                            val = self.symbol_table[lbl_name]
-                        else:
-                            line_err = True; break
+                    if is_jmp_call:
+                        val = self.symbol_table.get(raw_op_str.upper())
+                        if val is None:
+                            self.errors.append(f"{error_context_msg}: Undefined label '{raw_op_str}' for jump/call.")
+                            line_err = True;
+                            break
                     else:
                         val = self._parse_operand(raw_op_str, opcode_str, expect_address_16bit=True)
+
+                else:  # It's a numeric literal, not a label.
+                    if op_type_exp == 'I16':
+                        val = self._parse_operand(raw_op_str, opcode_str, expect_immediate_16bit=True)
+                    elif op_type_exp == 'S16':
+                        val = self._parse_operand(raw_op_str, opcode_str, expect_signed_immediate_16bit=True)
+                    elif op_type_exp == 'I8':
+                        val = self._parse_operand(raw_op_str, opcode_str, expect_immediate_8bit=True)
+                    elif op_type_exp == 'A16':
+                        val = self._parse_operand(raw_op_str, opcode_str, expect_address_16bit=True)
+
                 if val is None: line_err = True; break
                 parsed_vals.append(val)
             if line_err: continue
@@ -212,10 +237,9 @@ class SimpleAssembler:
                 elif op_type_enc in ['I16', 'A16', 'S16']:
                     current_instr_bytes.extend([val_enc & 0xFF, (val_enc >> 8) & 0xFF])
             self.machine_code.extend(current_instr_bytes)
-        return True
+        return not self.errors
 
     def _write_listing_file(self, listing_filename="program.asm"):
-        # ... (same as your last working version, which includes machine code bytes) ...
         try:
             with open(listing_filename, 'w') as f_list:
                 f_list.write(f"// Assembly Listing for {os.path.basename(listing_filename).replace('.asm', '.bin')}\n")
@@ -230,7 +254,7 @@ class SimpleAssembler:
                 mc_ptr = 0
                 for addr_p1, orig_ln, proc_ln in self.sal_listing_data:
                     addr_s = "        ";
-                    mc_bytes_s = "            "  # Default spacing
+                    mc_bytes_s = "            "
                     if addr_p1 != -1:
                         addr_s = f"{addr_p1:04X}h"
                         if proc_ln.endswith(":"):
@@ -243,19 +267,19 @@ class SimpleAssembler:
                                 if op_for_len in OPCODES:
                                     instr_len = self._get_instruction_byte_length(op_for_len)
                                     if mc_ptr + instr_len <= len(
-                                            self.machine_code):  # Ensure we don't read past generated MC
+                                            self.machine_code):
                                         mc_slice = self.machine_code[mc_ptr: mc_ptr + instr_len]
                                         mc_bytes_s = " ".join([f"{b:02X}" for b in mc_slice]).ljust(12)
                                         mc_ptr += instr_len
                     f_list.write(f"{addr_s} {mc_bytes_s}| {orig_ln}\n")
             print(f"Assembler: Assembly listing written to '{listing_filename}'")
         except IOError as e:
-            self.errors.append(f"Error writing listing file '{listing_filename}': {e}"); print(
+            self.errors.append(f"Error writing listing file '{listing_filename}': {e}");
+            print(
                 f"Assembler: Error writing listing file: {e}")
 
     def assemble_to_file(self, sal_code_string, output_binary_filename="program.bin",
                          output_listing_filename="program.asm"):
-        # ... (same as your last working version) ...
         sal_lines = sal_code_string.strip().split('\n');
         self.errors = [];
         self.machine_code = [];
@@ -275,19 +299,20 @@ class SimpleAssembler:
         if self.errors:
             print("\nAssembler: Assembly failed. Errors:");
             [print(f"  - {e}") for e in sorted(list(set(self.errors)))]
-            # Update listing file if second pass generated errors that affect byte view (less common)
-            self._write_listing_file(output_listing_filename)  # Re-write to potentially show partial MC before error
+            self._write_listing_file(output_listing_filename)
             return False
         try:
             with open(output_binary_filename, 'wb') as f_out:
                 f_out.write(bytes(self.machine_code))
             print(
                 f"\nAssembler: Machine code successfully written to '{output_binary_filename}' ({len(self.machine_code)} bytes)")
-            self._write_listing_file(output_listing_filename)  # Final listing with all MC bytes
+            self._write_listing_file(output_listing_filename)
             return True
         except IOError as e:
-            self.errors.append(f"Error writing binary: {e}"); print(
-                f"Assembler: Error writing binary: {e}"); return False
+            self.errors.append(f"Error writing binary: {e}");
+            print(
+                f"Assembler: Error writing binary: {e}");
+            return False
 
 
 if __name__ == "__main__":
@@ -309,7 +334,6 @@ if __name__ == "__main__":
         print(f"Assembly of {bin_f} FAILED.")
         if assembler.errors: [print(f"  - {e}") for e in assembler.errors]
 
-    # Previous test for LOADFR/STORFR (frame pointer style)
     test_sal_new_ops = """
     START:
         LOAD R5, #0x0100  ; R5 = Frame Pointer (base)
