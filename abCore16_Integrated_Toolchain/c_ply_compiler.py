@@ -1,5 +1,6 @@
 # c_ply_compiler.py
-# FINAL CORRECTED VERSION: Fixes parser grammar to correctly distinguish array declarations.
+# FINAL CORRECTED VERSION: Fixes parser grammar for the 'interrupt' keyword
+# using an unambiguous, robust structure.
 
 import os
 import sys
@@ -19,7 +20,6 @@ from ast_nodes import (
 )
 
 # --- Tokenizer (Lexer) Definition ---
-# (This section is correct and remains unchanged)
 tokens = (
     'NUMBER', 'IDENTIFIER', 'STRING_LITERAL', 'CHAR_LITERAL',
     'PLUS', 'MINUS', 'STAR', 'PLUSPLUS', 'MINUSMINUS',
@@ -30,7 +30,8 @@ tokens = (
     'BITWISE_OR', 'BITWISE_XOR', 'BITWISE_NOT',
     'PRINT', 'IF', 'ELSE', 'WHILE', 'FOR',
     'FUNC', 'RETURN', 'INT', 'CHAR',
-    'SWITCH', 'CASE', 'DEFAULT', 'BREAK'
+    'SWITCH', 'CASE', 'DEFAULT', 'BREAK',
+    'INTERRUPT'
 )
 t_ignore = ' \t'
 t_EQ = r'=='
@@ -64,7 +65,8 @@ t_BITWISE_NOT = r'~'
 reserved = {
     'print': 'PRINT', 'if': 'IF', 'else': 'ELSE', 'while': 'WHILE', 'for': 'FOR',
     'func': 'FUNC', 'return': 'RETURN', 'int': 'INT', 'char': 'CHAR',
-    'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK'
+    'switch': 'SWITCH', 'case': 'CASE', 'default': 'DEFAULT', 'break': 'BREAK',
+    'interrupt': 'INTERRUPT'
 }
 def t_STRING_LITERAL(t):
     r'\"([^"\\]|\\.)*\"'
@@ -74,8 +76,7 @@ def t_STRING_LITERAL(t):
 
 def t_CHAR_LITERAL(t):
     r"'([^\\']|\\.)'"
-    char_val = t.value[1:-1] # Strip the quotes
-    # THE FIX: Process escape sequences like '\\0' or '\\n'
+    char_val = t.value[1:-1]
     t.value = char_val.encode().decode('unicode_escape')
     return t
 
@@ -117,8 +118,6 @@ def p_type_specifier(p):
                       | CHAR'''
     p[0] = p[1]
 
-# --- THE FIX: The single p_variable_declaration_statement rule is split into specific, unambiguous rules ---
-
 def p_declaration_statement(p):
     '''declaration_statement : variable_declaration
                              | array_declaration'''
@@ -130,15 +129,15 @@ def p_variable_declaration(p):
                             | type_specifier STAR IDENTIFIER SEMI
                             | type_specifier STAR IDENTIFIER ASSIGN expression SEMI'''
     type_name = p[1]
-    if p[2] == '*': # Pointer Declaration
-        if len(p) == 5: # type * identifier ;
+    if p[2] == '*':
+        if len(p) == 5:
             p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), None, is_pointer=True, line_no=p.lineno(1))
-        else: # type * identifier = expression ;
+        else:
             p[0] = VarDeclNode(type_name, IdentifierNode(p[3], line_no=p.lineno(3)), p[5], is_pointer=True, line_no=p.lineno(1))
-    else: # Simple Variable Declaration
-        if len(p) == 6: # type identifier = expression ;
+    else:
+        if len(p) == 6:
             p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), p[4], line_no=p.lineno(1))
-        else: # type identifier ;
+        else:
             p[0] = VarDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), None, line_no=p.lineno(1))
 
 def p_array_declaration(p):
@@ -147,11 +146,8 @@ def p_array_declaration(p):
     size = p[4]
     if not isinstance(size, int) or size <= 0:
         print(f"FATAL PARSE ERROR: Array size for '{p[2]}' must be a positive integer, got '{size}' on line {p.lineno(4)}.")
-    # This now correctly creates an ArrayDeclNode
     p[0] = ArrayDeclNode(type_name, IdentifierNode(p[2], line_no=p.lineno(2)), size, line_no=p.lineno(1))
 
-
-# --- The rest of the file is UNCHANGED, but refers to the new rules ---
 def p_program(p):
     '''program : top_level_declaration_list'''
     p[0] = ProgramNode(p[1] if p[1] is not None else [], line_no=1)
@@ -171,9 +167,22 @@ def p_statement_for_global_scope(p):
                                   | expression_statement
                                   | empty_statement'''
     p[0] = p[1]
+
+# --- MODIFIED FOR INTERRUPT SUPPORT: This is the new, unambiguous grammar structure ---
 def p_function_definition(p):
-    '''function_definition : FUNC IDENTIFIER LPAREN parameter_list_opt RPAREN block_statement'''
-    p[0] = FunctionDefinitionNode(IdentifierNode(p[2], line_no=p.lineno(2)), p[4], p[6], line_no=p.lineno(1))
+    '''function_definition : interrupt_specifier FUNC IDENTIFIER LPAREN parameter_list_opt RPAREN block_statement'''
+    is_interrupt = p[1]
+    name_node = IdentifierNode(p[3], line_no=p.lineno(3))
+    params = p[5]
+    body = p[7]
+    p[0] = FunctionDefinitionNode(name_node, params, body, is_interrupt=is_interrupt, line_no=p.lineno(2))
+
+def p_interrupt_specifier(p):
+    '''interrupt_specifier : INTERRUPT
+                           | empty'''
+    p[0] = (len(p) > 1 and p.slice[1].type == 'INTERRUPT')
+# --- END MODIFICATION ---
+
 def p_parameter_list_opt(p):
     '''parameter_list_opt : parameter_list
                           | empty'''
@@ -205,7 +214,6 @@ def p_statement(p):
                  | switch_statement
                  | break_statement'''
     p[0] = p[1]
-# (All other p_ rules are identical to your Gist file)
 def p_expression_statement(p):
     '''expression_statement : expression SEMI'''
     p[0] = ExpressionStatementNode(p[1], line_no=p.slice[1].lineno if hasattr(p.slice[1], 'lineno') else p.lineno(1))
