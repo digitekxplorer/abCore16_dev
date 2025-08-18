@@ -78,6 +78,12 @@ class SimpleTranslator:
             (re.compile(r"POP\s+(R[0-7])", re.IGNORECASE), "POP {0}", ['R']),
             (re.compile(r"CALL\s+([A-Z_0-9]+)", re.IGNORECASE), "CALL {0}", ['L']),
             (re.compile(r"RET", re.IGNORECASE), "RET", ['N']),
+
+            # NEW INTERRUPT INSTRUCTIONS
+            (re.compile(r"EI", re.IGNORECASE), "EI", ['N']),  # Enable Interrupts
+            (re.compile(r"DI", re.IGNORECASE), "DI", ['N']),  # Disable Interrupts
+            (re.compile(r"RETI", re.IGNORECASE), "RETI", ['N']),  # Return from Interrupt
+
             (re.compile(r"NOP", re.IGNORECASE), "NOP", ['N']),
             (re.compile(r"HALT", re.IGNORECASE), "HALT", ['N']),
             (re.compile(r"([A-Z_0-9]+):", re.IGNORECASE), "{0}:", ['L_DEF']),
@@ -194,8 +200,10 @@ class SimpleTranslator:
                     original_ssl_comment = line_text_orig.split('//', 1)[1].strip()
                     if original_ssl_comment: comment_to_append = f" ; // {original_ssl_comment}"
 
-                is_simple_no_op_or_label = sal_instruction_part.endswith(":") or sal_instruction_part in ["RET", "NOP",
-                                                                                                          "HALT"]
+                # Updated to include the new interrupt instructions
+                is_simple_no_op_or_label = sal_instruction_part.endswith(":") or sal_instruction_part in ["RET", "RETI",
+                                                                                                          "EI", "DI",
+                                                                                                          "NOP", "HALT"]
                 current_sal_line_to_add = f"{sal_instruction_part}{comment_to_append}" if not is_simple_no_op_or_label else sal_instruction_part
 
                 translated_assembly_lines.append(current_sal_line_to_add)
@@ -209,36 +217,40 @@ class SimpleTranslator:
 # Standalone test
 if __name__ == "__main__":
     translator = SimpleTranslator()
-    # Test program with byte instructions and mixed comma/no-comma syntax
-    test_ssl_byte_ops = """
-    // Test new byte instructions for abCore16
+    # Test program with interrupt instructions
+    test_ssl_interrupt = """
+    // Test interrupt instructions for abCore16
     SET R0, 0x1234          // Load a test value
-    SET R1, 0x2000          // Load byte address
-    SET R2, 0x2001          // Load another byte address
+    SET R1, 0x2000          // Load an address
 
-    // Test direct byte access
+    DI                      // Disable interrupts
+
+    // Critical section
     STORB R0, 0x1500        // Store byte to direct address
     LOADB R3, 0x1500        // Load byte from direct address
 
-    // Test indirect byte access
-    STORIB R0, R1           // Store byte using register indirect
-    LOADIB R4 R1            // Load byte using register indirect
+    EI                      // Enable interrupts
 
-    // Test with no-comma syntax
-    STORIB R3 R2            // Store with no comma
-    LOADIB R5, R2           // Load with comma
+    // Simulate ISR
+    ISR_HANDLER:
+    PUSH R0                 // Save context
+    PUSH R1
 
-    // Test mixed with existing instructions
-    LOADI R6, R1            // Word indirect load
-    STORI R6, R2            // Word indirect store
+    SET R0, 0x9999          // ISR work
+    PRINT R0
 
-    PRINT R3                // Output the byte value
-    PRINT R4                // Output another byte value
+    POP R1                  // Restore context
+    POP R0
+    RETI                    // Return from interrupt
+
+    MAIN_LOOP:
+    PRINT R3                // Output value
+    JMP MAIN_LOOP           // Loop forever
 
     HALT
     """
-    print(f"Translating SSL with new byte instructions:\n{test_ssl_byte_ops}")
-    compiled_sal, had_errors = translator.translate_program(test_ssl_byte_ops)
+    print(f"Translating SSL with interrupt instructions:\n{test_ssl_interrupt}")
+    compiled_sal, had_errors = translator.translate_program(test_ssl_interrupt)
     print("\nTranslated SAL:")
     print(compiled_sal)
     if had_errors:
