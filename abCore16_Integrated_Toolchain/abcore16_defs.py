@@ -2,7 +2,7 @@
 """
 Centralized definitions for the abCore16 microprocessor project.
 Includes opcodes, register names, instruction formats, and other constants.
-MODIFIED: Added LOADBFR and STORBFR frame-relative byte instructions.
+MODIFIED: Added interrupt instructions (EI, DI, RETI) and IVT address.
 """
 
 # --- Hardware Configuration Constants ---
@@ -10,13 +10,13 @@ MODIFIED: Added LOADBFR and STORBFR frame-relative byte instructions.
 # in the hardware (FPGA BRAM). The simulator and memory file generator use this.
 HARDWARE_DATA_MEM_SIZE_BYTES = 8192
 
+# ... (Opcodes, Registers, Instruction Formats, etc. are unchanged) ...
 # --- Opcodes ---
 OPCODES = {
     "NOP": 0x00, "LOAD": 0x01, "STORE": 0x02, "LOADM": 0x03,
     "LOADFR": 0x04, "STORFR": 0x05, "LOADI": 0x06, "STORI": 0x07,
-    # Byte access instructions
     "LOADB": 0x08, "STORB": 0x09, "LOADIB": 0x0A, "STORIB": 0x0B,
-    "LOADBFR": 0x0C, "STORBFR": 0x0D,  # NEW: Frame-relative byte instructions
+    "LOADBFR": 0x0C, "STORBFR": 0x0D,
 
     "ADD": 0x10, "SUB": 0x11, "MUL": 0x12, "INC": 0x13, "DEC": 0x14,
     "AND": 0x20, "OR": 0x21, "XOR": 0x22, "NOT": 0x23,
@@ -27,6 +27,11 @@ OPCODES = {
     "JS": 0x55, "JNS": 0x56, "JC": 0x57, "JNC": 0x58, "JO": 0x59, "JNO": 0x5A,
     "PUSH": 0x60, "POP": 0x61,
     "CALL": 0x70, "RET": 0x71,
+    # NEW: Interrupt instructions
+    "EI":   0x72,  # Enable Interrupts
+    "DI":   0x73,  # Disable Interrupts
+    "RETI": 0x74,  # Return from Interrupt
+
     "MOV": 0x80, "MOVFRSP": 0x81, "MOVTOSP": 0x82,
     "HALT": 0xFF
 }
@@ -48,8 +53,10 @@ INSTRUCTION_FORMATS = {
     "STORFR": (5, ['R', 'R', 'S16']), "LOADI": (3, ['R', 'R']), "STORI": (3, ['R', 'R']),
     "LOADB": (4, ['R', 'A16']), "STORB": (4, ['R', 'A16']), "LOADIB": (3, ['R', 'R']),
     "STORIB": (3, ['R', 'R']),
-    # NEW: Frame-relative byte instructions
     "LOADBFR": (5, ['R', 'R', 'S16']), "STORBFR": (5, ['R', 'R', 'S16']),
+
+    # NEW: Interrupt instruction formats
+    "EI": (1, []), "DI": (1, []), "RETI": (1, []),
 
     "INM": (4, ['R', 'A16']), "OUTM": (4, ['R', 'A16']), "ADD": (3, ['R', 'R']),
     "SUB": (3, ['R', 'R']), "MUL": (3, ['R', 'R']), "AND": (3, ['R', 'R']),
@@ -72,6 +79,13 @@ MIN_SIGNED_IMMEDIATE_16BIT = -32768
 MAX_SIGNED_IMMEDIATE_16BIT = 32767
 
 # --- Memory Layout Constants ---
+# NOTE: The detailed peripheral memory map is defined in 'abcore16_defs.h'.
+# Only core, architectural addresses are defined here.
+# A common design choice for a microcontroller is to place the Interrupt Vector Table
+# at the very beginning of the memory map, immediately following the reset vector
+# (which is often at address 0x0000).
+IVT_START_ADDR = 0x0002          # NEW: Start address of the Interrupt Vector Table
+GLOBAL_DATA_START_ADDR = 0x0800
 DEFAULT_MMIO_INPUT_ADDR = 0x17FE
 DEFAULT_MMIO_OUTPUT_ADDR = 0x17FF
-GLOBAL_DATA_START_ADDR = 0x0800
+MMIO_BASE_ADDR = 0x1800
