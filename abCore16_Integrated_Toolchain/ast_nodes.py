@@ -204,10 +204,11 @@ class UnaryOpNode(ExpressionNode):
 
 
 class FunctionDefinitionNode(Node):
-    def __init__(self, name_node, params_nodes, body_node, line_no=None):
+    def __init__(self, name_node, params_nodes, body_node, line_no=None, is_interrupt=False): # Add is_interrupt):
         super().__init__(line_no)
         self.name_node = name_node
         self.params_nodes = params_nodes
+        self.is_interrupt = is_interrupt  # Add this line
         self.body_node = body_node
 
     def __repr__(self):
