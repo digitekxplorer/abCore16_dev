@@ -1,6 +1,6 @@
 # code_generator.py
-# FINAL CORRECTED VERSION: Restores the missing _lookup_symbol method and
-# includes all hardware-accurate addressing fixes.
+# FINAL CORRECTED VERSION: Fixes SAL syntax generation for assembler compatibility,
+# specifically for immediate vs. address operands in LOAD/STORE instructions.
 
 from ast_nodes import (
     Node, ProgramNode, StatementNode, AssignmentNode, PrintNode, IfNode, WhileNode,
@@ -13,7 +13,7 @@ from ast_nodes import (
     StringLiteralNode,
     CharLiteralNode
 )
-from abcore16_defs import GLOBAL_DATA_START_ADDR
+from abcore16_defs import GLOBAL_DATA_START_ADDR, IVT_START_ADDR
 
 CG_DEBUG_VERBOSE = False
 
@@ -37,6 +37,7 @@ class SALCodeGenerator:
         self.frame_pointer_reg = "R5"
         self.scratch_reg_1 = "R2"
         self.break_label_stack = []
+        self.interrupt_service_routines = {}
 
     def _initialize_temp_regs(self):
         self._available_temp_regs = list(self._compiler_temp_pool_master)
@@ -104,15 +105,12 @@ class SALCodeGenerator:
                 return
         raise Exception(f"CodeGen Internal Error: Cannot update type for unknown symbol '{name}'.")
 
-    # +++ RESTORED MISSING METHOD +++
     def _lookup_symbol(self, name):
         name_upper = name.upper()
         for i, scope_table in enumerate(reversed(self.symbol_tables)):
             if name_upper in scope_table:
                 return scope_table[name_upper]
         return None
-
-    # +++ END OF RESTORED METHOD +++
 
     def _get_expression_type(self, node):
         if isinstance(node, IdentifierNode):
@@ -205,8 +203,11 @@ class SALCodeGenerator:
         self.next_available_global_data_address = GLOBAL_DATA_START_ADDR
         self.current_function_context = None
         self.function_meta_map = {}
+        self.interrupt_service_routines = {}
+
         if not isinstance(ast_root_node, ProgramNode):
             return ""
+
         if hasattr(ast_root_node, 'statements'):
             for stmt in ast_root_node.statements:
                 if isinstance(stmt, FunctionDefinitionNode):
@@ -219,12 +220,35 @@ class SALCodeGenerator:
                     self._enter_scope('function', func_name_upper + "_countscope_pass")
                     local_storage_bytes = self._calculate_local_storage_size_recursive(stmt.body_node)
                     self._exit_scope()
+
                     self.function_meta_map[func_name_upper] = {
-                        'sal_label': sal_label,
-                        'param_names': param_names,
-                        'epilogue_label': epilogue_label,
-                        'local_storage_bytes': local_storage_bytes
+                        'sal_label': sal_label, 'param_names': param_names,
+                        'epilogue_label': epilogue_label, 'local_storage_bytes': local_storage_bytes,
+                        'is_interrupt': stmt.is_interrupt
                     }
+
+                    if stmt.is_interrupt:
+                        parts = stmt.name_node.name.split('_')
+                        if len(parts) != 2 or not parts[1].isdigit():
+                            raise Exception(
+                                f"CodeGen Error: Interrupt function '{stmt.name_node.name}' must be named 'ISR_N' where N is the IRQ number.")
+                        irq_num = int(parts[1])
+                        if irq_num in self.interrupt_service_routines:
+                            raise Exception(f"CodeGen Error: Multiple ISRs defined for IRQ #{irq_num}.")
+                        self.interrupt_service_routines[irq_num] = sal_label
+
+        ivt_init_code = []
+        if self.interrupt_service_routines:
+            ivt_init_code.append("// --- Interrupt Vector Table (IVT) Initializer ---")
+            val_reg = "R1"  # Use fixed registers to avoid temp pool issues
+            for irq_num, sal_label in sorted(self.interrupt_service_routines.items()):
+                ivt_byte_addr = IVT_START_ADDR + (irq_num * 2)
+                ivt_hw_addr = ivt_byte_addr << 1
+                ivt_init_code.append(f"// Set IVT Entry for IRQ #{irq_num} at byte address 0x{ivt_byte_addr:04X}")
+                ivt_init_code.append(f"LOAD {val_reg}, #{sal_label}")
+                ivt_init_code.append(f"STORE {val_reg}, 0x{ivt_byte_addr:04X}")
+            ivt_init_code.append("// --- End IVT Initializer ---\n")
+
         global_code_sal = []
         temp_sal_holder = self.sal_code
         self.sal_code = global_code_sal
@@ -239,7 +263,10 @@ class SALCodeGenerator:
                         if is_executable:
                             has_any_global_executable_code = True
         self.sal_code = temp_sal_holder
+
+        self.sal_code.extend(ivt_init_code)
         self.sal_code.extend(global_code_sal)
+
         main_called_or_global_code_ran = has_any_global_executable_code
         if "MAIN" in self.function_meta_map:
             self.emit(f"CALL {self.function_meta_map['MAIN']['sal_label']}")
@@ -277,7 +304,9 @@ class SALCodeGenerator:
                 string_init_code.append(f"STORIB {char_reg}, {addr_reg}")
             string_init_code.append("// --- End String Literal Initializers ---")
             string_init_code.append("")
-            self.sal_code = string_init_code + self.sal_code
+            # Insert string init code right after IVT init code
+            self.sal_code = self.sal_code[:len(ivt_init_code)] + string_init_code + self.sal_code[len(ivt_init_code):]
+
         if self._currently_used_temps and CG_DEBUG_VERBOSE:
             print(
                 f"// WARNING CG: End of gen, {len(self._currently_used_temps)} temp regs used: {self._currently_used_temps}")
@@ -315,36 +344,29 @@ class SALCodeGenerator:
         if CG_DEBUG_VERBOSE:
             self.emit(
                 f"// VarDecl: {node.data_type}{'*' if node.is_pointer else ''} {node.var_name_node.name} (Line: {node.line_no})")
-
         is_local = any(s['type'] == 'function' for s in self.scope_stack_info)
         if is_local:
             size_in_bytes = 2
         else:
-            size_in_bytes = 2  # All globals reserve at least 2 bytes for simplicity
-
+            size_in_bytes = 2
         var_data_type = node.data_type
         if node.init_expr_node:
             init_type = self._get_expression_type(node.init_expr_node)
             if 'pointer' in init_type:
                 var_data_type = init_type
-
         symbol_info = self._allocate_storage_for_decl(node.var_name_node, size_in_bytes, is_array=False,
                                                       data_type=var_data_type, is_pointer=node.is_pointer)
-
         if node.init_expr_node:
             expr_val_reg = node.init_expr_node.accept(self)
             if expr_val_reg is None or not isinstance(expr_val_reg, str):
                 raise Exception(f"CodeGen Error: Initializer for '{node.var_name_node.name}' failed.")
             if not symbol_info:
                 raise Exception(f"CodeGen Internal Error: Symbol info for '{node.var_name_node.name}' not found.")
-
             if symbol_info['type'] == 'global':
                 if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
-                    self.emit(f"STORB {expr_val_reg}, #{symbol_info['loc']:04X}")
+                    self.emit(f"STORB {expr_val_reg}, 0x{symbol_info['loc']:04X}")
                 else:
-                    hw_addr = symbol_info['loc'] << 1
-                    self.emit(f"STORE {expr_val_reg}, #{hw_addr:04X}")
-
+                    self.emit(f"STORE {expr_val_reg}, 0x{symbol_info['loc']:04X}")
             elif symbol_info['type'] in ['local', 'local_array']:
                 if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
                     self.emit(f"STORBFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
@@ -353,7 +375,6 @@ class SALCodeGenerator:
             else:
                 raise Exception(
                     f"CodeGen: Cannot initialize VarDeclNode of unknown symbol type '{symbol_info['type']}'")
-
             if expr_val_reg in self._compiler_temp_pool_master:
                 self._free_temp(expr_val_reg)
 
@@ -378,14 +399,11 @@ class SALCodeGenerator:
         name_upper = node.name.upper()
         if name_upper in ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"]:
             return name_upper
-
         symbol_info = self._lookup_symbol(node.name)
         if not symbol_info:
             raise Exception(
                 f"CodeGen Error: Undeclared identifier '{node.name}' (Line: {node.line_no if node.line_no else 'N/A'})")
-
         temp_reg = self._new_temp()
-
         if symbol_info['type'] in ['array', 'local_array']:
             self.emit(f"// Resolving array identifier '{node.name}' to its base address")
             if symbol_info['type'] == 'array':
@@ -398,14 +416,11 @@ class SALCodeGenerator:
                 self.emit(f"SUB {temp_reg}, {offset_reg}")
                 self._free_temp(offset_reg)
             return temp_reg
-
         if symbol_info['type'] == 'global':
             if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
-                self.emit(f"LOADB {temp_reg}, #{symbol_info['loc']:04X}")
+                self.emit(f"LOADB {temp_reg}, 0x{symbol_info['loc']:04X}")
             else:
-                hw_addr = symbol_info['loc'] << 1
-                self.emit(f"LOADM {temp_reg}, #{hw_addr:04X}")
-
+                self.emit(f"LOADM {temp_reg}, 0x{symbol_info['loc']:04X}")
         elif symbol_info['type'] in ['param', 'local']:
             if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
                 self.emit(f"LOADBFR {temp_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
@@ -415,7 +430,6 @@ class SALCodeGenerator:
             self._free_temp(temp_reg)
             raise Exception(
                 f"CodeGen Error: Unknown symbol type '{symbol_info['type']}' for '{node.name}' during lookup")
-
         return temp_reg
 
     def visit_AssignmentNode(self, node):
@@ -423,7 +437,6 @@ class SALCodeGenerator:
         if isinstance(target_node, IdentifierNode):
             value_type = self._get_expression_type(node.value_expr)
             self._update_symbol_type(target_node.name, value_type)
-
         if isinstance(target_node, UnaryOpNode) and target_node.op == '*':
             self.emit(f"// --- Assignment to Dereferenced Pointer * (Line: {node.line_no}) ---")
             addr_reg = target_node.operand.accept(self)
@@ -436,23 +449,18 @@ class SALCodeGenerator:
             self._free_temp(value_reg)
             self._free_temp(addr_reg)
             return
-
         elif isinstance(target_node, IdentifierNode):
             expr_val_reg = node.value_expr.accept(self)
             if expr_val_reg is None:
                 raise Exception(f"RHS of assignment to '{target_node.name}' is invalid.")
-
             symbol_info = self._lookup_symbol(target_node.name)
             if not symbol_info:
                 raise Exception(f"Assignment to undeclared variable '{target_node.name}'.")
-
             if symbol_info['type'] == 'global':
                 if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
-                    self.emit(f"STORB {expr_val_reg}, #{symbol_info['loc']:04X}")
+                    self.emit(f"STORB {expr_val_reg}, 0x{symbol_info['loc']:04X}")
                 else:
-                    hw_addr = symbol_info['loc'] << 1
-                    self.emit(f"STORE {expr_val_reg}, #{hw_addr:04X}")
-
+                    self.emit(f"STORE {expr_val_reg}, 0x{symbol_info['loc']:04X}")
             elif symbol_info['type'] in ['param', 'local']:
                 if symbol_info['data_type'] == 'char' and not symbol_info.get('is_pointer'):
                     self.emit(f"STORBFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
@@ -460,23 +468,18 @@ class SALCodeGenerator:
                     self.emit(f"STORFR {expr_val_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
             else:
                 raise Exception(f"Invalid target symbol type '{symbol_info['type']}' for assignment.")
-
             self._free_temp(expr_val_reg)
-
         elif isinstance(target_node, ArrayAccessNode):
             self.emit(f"// Assignment to array element {target_node.name_node.name}[...]")
             value_reg = node.value_expr.accept(self)
             if value_reg is None:
                 raise Exception("RHS of array assignment is invalid.")
-
             addr_reg = self._generate_address_of_array_element(target_node)
             symbol_info = self._lookup_symbol(target_node.name_node.name)
-
             if symbol_info and symbol_info.get('data_type') == 'char_pointer':
                 self.emit(f"STORIB {value_reg}, {addr_reg} // Mem[{addr_reg}] = {value_reg} (byte)")
             else:
                 self.emit(f"STORI {value_reg}, {addr_reg} // Mem[{addr_reg}] = {value_reg} (word)")
-
             self._free_temp(addr_reg)
             self._free_temp(value_reg)
         else:
@@ -486,6 +489,9 @@ class SALCodeGenerator:
         if node and node.statements:
             for stmt_node in node.statements:
                 if stmt_node: stmt_node.accept(self)
+
+
+
 
     def visit_FunctionDefinitionNode(self, node):
         func_name_upper = node.name_node.name.upper()
@@ -499,60 +505,108 @@ class SALCodeGenerator:
             'sal_label': func_meta['sal_label'],
             'epilogue_label': func_meta['epilogue_label'],
             'param_map': {},
-            'local_storage_bytes': func_meta['local_storage_bytes']
+            'local_storage_bytes': func_meta['local_storage_bytes'],
+            'is_interrupt': func_meta['is_interrupt']
         }
 
         self._enter_scope('function', scope_name=func_name_upper)
         current_function_scope_info = self.scope_stack_info[-1]
         current_function_scope_info['fp_offset_next_local'] = 0
 
+        # Set up parameters (ISRs shouldn't have parameters, but handle anyway)
         for i, param_node in enumerate(node.params_nodes):
+            if self.current_function_context['is_interrupt'] and len(node.params_nodes) > 0:
+                raise Exception(f"CodeGen Error: Interrupt function '{func_name_upper}' cannot have parameters.")
             param_name_upper = param_node.name.upper()
             offset = 6 + (i * 2)
             self.current_function_context['param_map'][param_name_upper] = offset
             self._add_symbol(param_node.name, 'param', offset)
 
         self.emit(f"\n// Function: {node.name_node.name}({', '.join(p.name for p in node.params_nodes)})")
+        if self.current_function_context['is_interrupt']:
+            self.emit(f"// Interrupt Service Routine - Auto-save all registers")
         self.emit(f"{self.current_function_context['sal_label']}:")
-        self.emit(f"PUSH {self.frame_pointer_reg}")
-        self.emit(f"MOVFRSP {self.frame_pointer_reg}")
 
-        local_storage_bytes_to_alloc = self.current_function_context['local_storage_bytes']
-        if CG_DEBUG_VERBOSE:
-            self.emit(
-                f"// DEBUG_CG: Function '{func_name_upper}' allocating {local_storage_bytes_to_alloc} bytes for local storage.")
+        # INTERRUPT PROLOGUE
+        if self.current_function_context['is_interrupt']:
+            # Save all general-purpose registers R0-R7
+            self.emit(f"// Save all registers (R0-R7)")
+            for reg_num in range(8):
+                self.emit(f"PUSH R{reg_num}")
 
-        if local_storage_bytes_to_alloc > 0:
-            self.emit(f"// Allocating {local_storage_bytes_to_alloc} bytes on stack for locals")
-            alloc_reg = self._new_temp()
-            self.emit(f"LOAD {alloc_reg}, #{local_storage_bytes_to_alloc}")
-            self.emit(f"MOVFRSP {self.scratch_reg_1}")
-            self.emit(f"SUB {self.scratch_reg_1}, {alloc_reg}")
-            self.emit(f"MOVTOSP {self.scratch_reg_1}")
-            self._free_temp(alloc_reg)
+            # Save frame pointer only if we have local variables
+            if self.current_function_context['local_storage_bytes'] > 0:
+                self.emit(f"// Save frame pointer for local variables")
+                self.emit(f"PUSH {self.frame_pointer_reg}")
+                self.emit(f"MOVFRSP {self.frame_pointer_reg}")
 
+                # Allocate local storage
+                self.emit(f"// Allocating {self.current_function_context['local_storage_bytes']} bytes for locals")
+                alloc_reg = "R1"  # Use R1 as temp (already saved)
+                self.emit(f"LOAD {alloc_reg}, #{self.current_function_context['local_storage_bytes']}")
+                self.emit(f"MOVFRSP {self.scratch_reg_1}")
+                self.emit(f"SUB {self.scratch_reg_1}, {alloc_reg}")
+                self.emit(f"MOVTOSP {self.scratch_reg_1}")
+        else:
+            # NORMAL FUNCTION PROLOGUE
+            self.emit(f"PUSH {self.frame_pointer_reg}")
+            self.emit(f"MOVFRSP {self.frame_pointer_reg}")
+
+            # Allocate local storage for normal functions
+            local_storage_bytes_to_alloc = self.current_function_context['local_storage_bytes']
+            if local_storage_bytes_to_alloc > 0:
+                self.emit(f"// Allocating {local_storage_bytes_to_alloc} bytes on stack for locals")
+                alloc_reg = self._new_temp()
+                self.emit(f"LOAD {alloc_reg}, #{local_storage_bytes_to_alloc}")
+                self.emit(f"MOVFRSP {self.scratch_reg_1}")
+                self.emit(f"SUB {self.scratch_reg_1}, {alloc_reg}")
+                self.emit(f"MOVTOSP {self.scratch_reg_1}")
+                self._free_temp(alloc_reg)
+
+        # Generate function body
         if node.body_node:
             node.body_node.accept(self)
 
+        # Check if we need implicit jump to epilogue
         needs_implicit_jmp_to_epilogue = True
         if self.sal_code:
             last_sal_instr = self.sal_code[-1].strip().upper()
-            if last_sal_instr == "RET" or (
-                    last_sal_instr.startswith("JMP") and self.current_function_context and
+            if last_sal_instr in ["RET", "RETI"] or (
+                    last_sal_instr.startswith("JMP") and
                     last_sal_instr.endswith(self.current_function_context['epilogue_label'])):
                 needs_implicit_jmp_to_epilogue = False
 
-        if needs_implicit_jmp_to_epilogue and self.current_function_context:
+        if needs_implicit_jmp_to_epilogue:
             self.emit(f"JMP {self.current_function_context['epilogue_label']}")
 
+        # EPILOGUE
         self.emit(f"{self.current_function_context['epilogue_label']}:")
-        if local_storage_bytes_to_alloc > 0:
-            self.emit(f"MOVTOSP {self.frame_pointer_reg}")
-        self.emit(f"POP {self.frame_pointer_reg}")
-        self.emit(f"RET")
+
+        if self.current_function_context['is_interrupt']:
+            # INTERRUPT EPILOGUE
+            # Restore frame pointer if it was used
+            if self.current_function_context['local_storage_bytes'] > 0:
+                self.emit(f"// Restore stack and frame pointer")
+                self.emit(f"MOVTOSP {self.frame_pointer_reg}")
+                self.emit(f"POP {self.frame_pointer_reg}")
+
+            # Restore all registers in reverse order
+            self.emit(f"// Restore all registers (R7-R0)")
+            for reg_num in range(7, -1, -1):
+                self.emit(f"POP R{reg_num}")
+
+            self.emit(f"RETI  // Return from interrupt")
+        else:
+            # NORMAL FUNCTION EPILOGUE
+            if self.current_function_context['local_storage_bytes'] > 0:
+                self.emit(f"MOVTOSP {self.frame_pointer_reg}")
+            self.emit(f"POP {self.frame_pointer_reg}")
+            self.emit(f"RET")
 
         self._exit_scope()
         self.current_function_context = original_outer_context
+
+
 
     def visit_ForNode(self, node):
         if node.init_node: node.init_node.accept(self)
@@ -689,21 +743,19 @@ class SALCodeGenerator:
                 elif op == '>':
                     self.emit(f"JE {false_branch_label}");
                     lbl = self.new_label("SGT");
+                    self.emit(f"JS {lbl}");
                     self.emit(
-                        f"JS {lbl}");
-                    self.emit(f"JNO {true_branch_label}");
-                    self.emit(
-                        f"JMP {false_branch_label}");
+                        f"JNO {true_branch_label}");
+                    self.emit(f"JMP {false_branch_label}");
                     self.emit(f"{lbl}:");
                     self.emit(f"JO {true_branch_label}")
                 elif op == '<=':
                     self.emit(f"JE {true_branch_label}");
                     lbl = self.new_label("SLE");
+                    self.emit(f"JS {lbl}");
                     self.emit(
-                        f"JS {lbl}");
-                    self.emit(f"JO {true_branch_label}");
-                    self.emit(
-                        f"JMP {false_branch_label}");
+                        f"JO {true_branch_label}");
+                    self.emit(f"JMP {false_branch_label}");
                     self.emit(f"{lbl}:");
                     self.emit(
                         f"JNO {true_branch_label}")
@@ -929,7 +981,6 @@ class SALCodeGenerator:
             else:
                 raise Exception(
                     f"CodeGen Error: Address-of operator '&' can only be applied to variables or array elements on line {node.line_no}.")
-
         elif op == '*':
             self.emit(f"// --- Dereference * (as value) (Line: {node.line_no}) ---")
             addr_reg = node.operand.accept(self)
@@ -941,7 +992,6 @@ class SALCodeGenerator:
                 self.emit(f"LOADI {value_reg}, {addr_reg} // {value_reg} = Mem[{addr_reg}] (word)")
             self._free_temp(addr_reg)
             return value_reg
-
         operand_reg = node.operand.accept(self)
         if operand_reg is None: raise Exception(f"CodeGen Error: Operand for unary op '{op}' is invalid.")
         result_reg = operand_reg
@@ -978,7 +1028,6 @@ class SALCodeGenerator:
         self.emit(f"MOV {val_to_modify_reg}, {result_reg}");
         is_pointer = 'pointer' in symbol_info.get('data_type', '')
         is_char = symbol_info.get('data_type') == 'char'
-
         if is_pointer:
             scale_val = 1 if symbol_info.get('data_type') == 'char_pointer' else 2
             self.emit(f"// Pointer arithmetic scaling (size={scale_val})");
@@ -997,10 +1046,9 @@ class SALCodeGenerator:
         self.emit(f"// Store updated value back into '{var_name}'")
         if symbol_info['type'] == 'global':
             if is_char and not is_pointer:
-                self.emit(f"STORB {val_to_modify_reg}, #{symbol_info['loc']:04X}")
+                self.emit(f"STORB {val_to_modify_reg}, 0x{symbol_info['loc']:04X}")
             else:
-                hw_addr = symbol_info['loc'] << 1
-                self.emit(f"STORE {val_to_modify_reg}, #{hw_addr:04X}")
+                self.emit(f"STORE {val_to_modify_reg}, 0x{symbol_info['loc']:04X}")
         elif symbol_info['type'] in ['local', 'param']:
             if is_char and not is_pointer:
                 self.emit(f"STORBFR {val_to_modify_reg}, {self.frame_pointer_reg}, #{symbol_info['loc']}")
@@ -1031,6 +1079,16 @@ class SALCodeGenerator:
 
     def visit_FunctionCallNode(self, node):
         func_name_upper = node.name_node.name.upper()
+
+        if func_name_upper == "ENABLE_INTERRUPTS":
+            if len(node.args_nodes) != 0: raise Exception(f"CodeGen Error: enable_interrupts() takes 0 arguments.")
+            self.emit("EI // Built-in enable_interrupts()")
+            return None
+        elif func_name_upper == "DISABLE_INTERRUPTS":
+            if len(node.args_nodes) != 0: raise Exception(f"CodeGen Error: disable_interrupts() takes 0 arguments.")
+            self.emit("DI // Built-in disable_interrupts()")
+            return None
+
         if func_name_upper == "PRINT_STRING":
             if len(node.args_nodes) != 1:
                 raise Exception(
@@ -1073,6 +1131,9 @@ class SALCodeGenerator:
             self.emit(f"OUT {newline_reg}")
             self._free_temp(newline_reg)
             return None
+
+
+
         elif func_name_upper == "MMIO_WRITE":
             if len(node.args_nodes) != 2:
                 raise Exception(
@@ -1084,6 +1145,7 @@ class SALCodeGenerator:
             self._free_temp(addr_reg)
             self._free_temp(value_reg)
             return None
+
         elif func_name_upper == "MMIO_READ":
             if len(node.args_nodes) != 1:
                 raise Exception(
@@ -1094,6 +1156,8 @@ class SALCodeGenerator:
             self.emit(f"LOADI {result_reg}, {addr_reg} // {result_reg} = Mem[{addr_reg}]")
             self._free_temp(addr_reg)
             return result_reg
+
+
         func_meta = self.function_meta_map.get(func_name_upper)
         if not func_meta:
             raise Exception(
